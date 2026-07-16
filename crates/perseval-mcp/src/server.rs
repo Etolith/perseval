@@ -21,7 +21,7 @@ use crate::descriptors::read_tools;
 use crate::input::{
     GetEvalBatchJobInput, GetEvidenceTraceInput, GetFailureGroupInput, GetVerificationReportInput,
     GroupSort, InspectFindingInput, ListFailureGroupsInput, ListRunsInput, ListSessionsInput,
-    PageInput, RunSort, SessionSort, input_fingerprint,
+    PageInput, SessionSort, input_fingerprint,
 };
 use crate::projection;
 
@@ -266,7 +266,12 @@ impl PersevalMcp {
             .map_err(|error| internal_error(tool, error))?;
         let mut rows = self
             .service
-            .list_runs_filtered(&filters, offset, limit)
+            .list_runs_filtered_ordered(
+                &filters,
+                input.sort.unwrap_or_default().into(),
+                offset,
+                limit,
+            )
             .map_err(|error| internal_error(tool, error))?;
         if let Some(status) = input.analysis_status.first() {
             rows.retain(|run| status.matches(run.analysis_status));
@@ -287,7 +292,6 @@ impl PersevalMcp {
                         .is_some_and(|value| value.to_lowercase().contains(&search))
             });
         }
-        sort_runs(&mut rows, input.sort.unwrap_or_default());
         let data = rows.iter().map(projection::run).collect::<Vec<_>>();
         let mut warnings = Vec::new();
         if rows.iter().any(|run| {
@@ -767,34 +771,6 @@ fn request_id() -> String {
         .as_millis();
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("request:{time:x}-{sequence:x}")
-}
-
-fn sort_runs(runs: &mut [RunSummary], sort: RunSort) {
-    match sort {
-        RunSort::Newest => runs.sort_by(|left, right| {
-            right
-                .last_committed_unix_ms
-                .cmp(&left.last_committed_unix_ms)
-                .then_with(|| left.logical_trace_id.cmp(&right.logical_trace_id))
-        }),
-        RunSort::Oldest => runs.sort_by(|left, right| {
-            left.last_committed_unix_ms
-                .cmp(&right.last_committed_unix_ms)
-                .then_with(|| left.logical_trace_id.cmp(&right.logical_trace_id))
-        }),
-        RunSort::MostSpans => runs.sort_by(|left, right| {
-            right
-                .span_count
-                .cmp(&left.span_count)
-                .then_with(|| left.logical_trace_id.cmp(&right.logical_trace_id))
-        }),
-        RunSort::MostFindings => runs.sort_by(|left, right| {
-            right
-                .finding_count
-                .cmp(&left.finding_count)
-                .then_with(|| left.logical_trace_id.cmp(&right.logical_trace_id))
-        }),
-    }
 }
 
 fn sort_groups(groups: &mut [perseval_service::FailureGroupSummary], sort: GroupSort) {

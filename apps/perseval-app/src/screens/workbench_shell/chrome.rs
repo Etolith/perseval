@@ -357,11 +357,12 @@ impl WorkbenchShell {
             .role(Role::Status)
             .aria_label(if self.health.enabled {
                 format!(
-                    "Receiver listening at {}. Queue {} of {}. Journal lag {}. Analysis pending {}.",
+                    "Receiver listening at {}. Queue {} of {}. Journal lag {}. {} runs live. Analysis pending {}.",
                     self.endpoint,
                     self.health.queue_batches,
                     self.health.queue_batch_capacity,
                     self.health.journal_lag,
+                    self.health.live_runs + self.health.reopened_runs,
                     self.health.analysis_pending
                 )
             } else {
@@ -385,10 +386,11 @@ impl WorkbenchShell {
             })
             .when(!compact, |bar| {
                 bar.child(format!(
-                    "queue {}/{} · journal lag {} · analysis {} pending",
+                    "queue {}/{} · journal lag {} · {} live · analysis {} pending",
                     self.health.queue_batches,
                     self.health.queue_batch_capacity,
                     self.health.journal_lag,
+                    self.health.live_runs + self.health.reopened_runs,
                     self.health.analysis_pending
                 ))
             })

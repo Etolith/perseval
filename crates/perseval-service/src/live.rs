@@ -14,8 +14,9 @@ use perseval_store::{
     CreateProjectV1, EvalBatchPreviewV1, EvalBatchSelectionSpecV1, EvalCandidateRecordV1,
     EvalReviewDecisionV1, FindingDispositionStateV1, FindingDispositionV1, PipelineStageSampleV1,
     PipelineStageV1, ProjectV1, QueryScopeV1, ReviewEvalCandidateV1, RunComparisonRequestV1,
-    RunFiltersV1, RunSummary, SourceHealth, SpanRow, SpanTreePageV1, TopologyProjectionJobV1,
-    TopologyProjectionRowV1, TraceDeltaV1, WorkspaceStore, WorkspaceStoreLayout,
+    RunFiltersV1, RunOrderV1, RunSummary, SourceHealth, SpanRow, SpanTreePageV1,
+    TopologyProjectionJobV1, TopologyProjectionRowV1, TraceDeltaV1, WorkspaceStore,
+    WorkspaceStoreLayout,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -708,6 +709,11 @@ impl LiveTraceService {
         let (topology_pending, topology_running) = self.store.topology_counts()?;
         health.topology_pending = topology_pending;
         health.topology_running = topology_running;
+        let (live, quiescent, finalized, reopened) = self.store.lifecycle_counts()?;
+        health.live_runs = live;
+        health.quiescent_runs = quiescent;
+        health.finalized_runs = finalized;
+        health.reopened_runs = reopened;
         Ok(health)
     }
 
@@ -731,8 +737,19 @@ impl LiveTraceService {
         offset: u64,
         limit: u32,
     ) -> Result<Vec<RunSummary>, LiveServiceError> {
-        Ok(self.store.list_runs_filtered(
+        self.list_runs_filtered_ordered(filters, RunOrderV1::Newest, offset, limit)
+    }
+
+    pub fn list_runs_filtered_ordered(
+        &self,
+        filters: &RunFiltersV1,
+        order: RunOrderV1,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<RunSummary>, LiveServiceError> {
+        Ok(self.store.list_runs_filtered_ordered(
             filters,
+            order,
             offset,
             limit.min(self.config.query.max_run_page),
         )?)

@@ -430,9 +430,12 @@ impl SettingsScreen {
             })
             .when(!compact, |navigation| {
                 navigation
+                    .h_full()
+                    .min_h_0()
                     .w(px(220.))
                     .flex_none()
                     .flex_col()
+                    .overflow_y_scroll()
                     .p_3()
                     .border_r_1()
             })

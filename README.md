@@ -10,9 +10,6 @@ Perseval is a local-first observability tool. It shows you why an AI agent
 failed, whether the same problem keeps happening, and whether your fix actually
 changed its behavior.
 
-Perseval is free software licensed under GPL-3.0-or-later. See
-[`LICENSE`](LICENSE).
-
 ### Getting Started
 
 Go from an empty workspace to your first investigation with one project and one
@@ -77,51 +74,22 @@ accessibility, and OpenAI provider readiness.
 
 ## Run Perseval
 
-Prerequisites:
+Download the [latest macOS build](https://github.com/Etolith/perseval/releases/latest/download/Perseval-macOS.zip), unzip it, and move `Perseval.app` to Applications. Perseval requires macOS 13 or newer; end users do not need Rust or Xcode.
 
-- macOS 13 or newer;
-- Xcode Command Line Tools;
-- the Rust toolchain pinned by `rust-toolchain.toml`.
+The current beta is ad-hoc signed. On first launch, macOS may ask you to approve it in **System Settings → Privacy & Security**, or you can Control-click the app and choose **Open**.
 
-Start locally with one command:
+Open Perseval, create a project, then load the local demo from **Sources**. This gives you a complete planner/browser/verifier investigation without configuring an exporter first.
 
-```bash
-cargo run -p perseval-app --bin perseval
-```
-
-Connect a trace source and Perseval begins organizing runs immediately. The
-native application opens the persisted workspace even when live OTLP ingestion
-is disabled.
-
-### Open a JSONL trace file
-
-Reproduce an issue from a saved trace without starting a live receiver. Use
-`PERSEVAL_TRACE_FILE` for canonical `traces-to-evals` `Trace` JSONL fixtures and
-OTLP for live applications and vendor-neutral instrumentation.
-
-```bash
-PERSEVAL_TRACE_FILE=/absolute/path/to/traces.jsonl \
-  cargo run -p perseval-app --bin perseval
-```
+Perseval always opens its persisted local workspace. Live OTLP ingestion stays disabled until you enable it in **Settings**, so installing the app does not open a listener by itself.
 
 ### Stream traces with OTLP
 
-Watch new agent behavior arrive while the application is running. Launch
-Perseval, open **Sources**, create a project, and keep its stable project ID;
-then configure your application with the endpoint and project resource
-attribute:
-
-```bash
-PERSEVAL_OTLP_ENABLED=1 \
-PERSEVAL_WORKSPACE_DIR="$PWD/.perseval/live" \
-cargo run -p perseval-app --bin perseval
-```
+Watch new agent behavior arrive while the application is running. Enable OTLP in **Settings**, restart Perseval when prompted, open **Sources**, create a project, and copy the displayed endpoint and project resource attribute into your agent configuration.
 
 Perseval accepts OTLP/HTTP protobuf and JSON on your machine at
 `http://127.0.0.1:4318/v1/traces`.
 
-If that port is already occupied, bind another loopback port explicitly with
-`PERSEVAL_OTLP_BIND=127.0.0.1:44319` and use the matching exporter endpoint.
+If port 4318 is occupied, Perseval keeps the workbench open, chooses an available loopback port, and shows the effective endpoint in **Sources** and the status bar. Always copy that displayed endpoint instead of assuming the default.
 
 ```bash
 OTEL_TRACES_EXPORTER=otlp \
@@ -232,12 +200,7 @@ That enables an investigation loop such as:
 Every response comes from committed, versioned projections. Raw payload bodies
 remain unavailable through the default read-only configuration.
 
-Build the stdio server, then register the executable with Codex, Claude, or any
-other MCP-compatible client:
-
-```bash
-cargo build -p perseval-mcp --bin perseval-mcp
-```
+Register the MCP executable bundled with the installed application in Codex, Claude, or any other MCP-compatible client. It uses stdio and never opens another OTLP listener.
 
 Example client configuration:
 
@@ -245,9 +208,8 @@ Example client configuration:
 {
   "mcpServers": {
     "perseval": {
-      "command": "/absolute/path/to/perseval/target/debug/perseval-mcp",
+      "command": "/Applications/Perseval.app/Contents/Resources/perseval-mcp",
       "env": {
-        "PERSEVAL_WORKSPACE_DIR": "/absolute/path/to/your/perseval-workspace",
         "PERSEVAL_MCP_READ_ENABLED": "true"
       }
     }
@@ -259,6 +221,8 @@ When the GUI owns the workspace, MCP clients are routed through its private
 user-only local socket. Live ingestion, the native workbench, and multiple agent
 investigators can therefore use the same workspace safely.
 
+If the GUI uses a custom workspace, add the same `PERSEVAL_WORKSPACE_DIR` value to the MCP client environment.
+
 Example questions to ask after connecting:
 
 - "Which runs have the most findings in this project?"
@@ -267,6 +231,8 @@ Example questions to ask after connecting:
 - "What telemetry is missing before this finding can be considered conclusive?"
 
 ### Build the macOS application
+
+Contributor builds require Xcode Command Line Tools and the Rust toolchain pinned by `rust-toolchain.toml`:
 
 ```bash
 scripts/package-macos-app.sh
@@ -302,3 +268,5 @@ next investigation workflow.
 Contribution and private
 security-reporting guidance are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and
 [`SECURITY.md`](SECURITY.md).
+
+Perseval is free software licensed under GPL-3.0-or-later. See [LICENSE](https://github.com/Etolith/perseval/blob/main/LICENSE).

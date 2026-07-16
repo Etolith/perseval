@@ -381,6 +381,16 @@ pub struct RunSummary {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunOrderV1 {
+    #[default]
+    Newest,
+    Oldest,
+    MostSpans,
+    MostFindings,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IdentityQualityV1 {
     Explicit,
     Inferred,
@@ -981,6 +991,14 @@ pub struct SourceHealth {
     pub cohort_running: bool,
     pub topology_pending: u64,
     pub topology_running: u64,
+    #[serde(default)]
+    pub live_runs: u64,
+    #[serde(default)]
+    pub quiescent_runs: u64,
+    #[serde(default)]
+    pub finalized_runs: u64,
+    #[serde(default)]
+    pub reopened_runs: u64,
     pub backpressured: bool,
     pub shutting_down: bool,
     pub last_error: Option<String>,

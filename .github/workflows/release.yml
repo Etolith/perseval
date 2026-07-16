@@ -8,11 +8,37 @@ permissions:
   contents: write
 
 jobs:
+  release-security:
+    name: Verify tagged revision security
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_DARWIN_ARM64_SHA256: b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan complete Git history
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "$GITLEAKS_DARWIN_ARM64_SHA256  $RUNNER_TEMP/$archive" | shasum -a 256 -c
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose .
+      - name: Audit applicable dependency vulnerabilities
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
   macos-release:
     name: Sign, notarize, and publish macOS release
     runs-on: macos-15
     timeout-minutes: 120
     environment: release
+    needs: release-security
     env:
       CARGO_TERM_COLOR: always
       MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -52,6 +78,14 @@ jobs:
           PERSEVAL_CODESIGN_IDENTITY: ${{ env.MACOS_SIGNING_IDENTITY }}
           PERSEVAL_BUILD_NUMBER: ${{ github.run_number }}
         run: scripts/package-macos-app.sh
+
+      - name: Verify the application bundle
+        run: |
+          test -x target/macos/Perseval.app/Contents/MacOS/perseval
+          test -x target/macos/Perseval.app/Contents/Resources/perseval-mcp
+          plutil -lint target/macos/Perseval.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 target/macos/Perseval.app
+          codesign --verify --strict --verbose=2 target/macos/Perseval.app/Contents/Resources/perseval-mcp
 
       - name: Notarize and staple
         if: ${{ env.MACOS_SIGNING_IDENTITY != '' }}

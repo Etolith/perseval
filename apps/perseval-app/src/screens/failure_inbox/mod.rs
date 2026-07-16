@@ -177,6 +177,7 @@ pub(crate) struct FailureInbox {
     inspector_open: bool,
     inspector_auto_open_suppressed: bool,
     inspector_width: f32,
+    text_scale: f32,
     tab: InspectorTab,
     candidate_preview: Option<EvalCandidatePreview>,
     batch_preview: Option<EvalBatchPreviewV1>,
@@ -269,6 +270,7 @@ impl FailureInbox {
             inspector_open: false,
             inspector_auto_open_suppressed: false,
             inspector_width: 360.,
+            text_scale: 1.,
             tab: InspectorTab::Finding,
             candidate_preview: None,
             batch_preview: None,
@@ -357,6 +359,11 @@ impl FailureInbox {
         })
         .detach();
         this
+    }
+
+    pub(crate) fn set_text_scale(&mut self, text_scale: f32, cx: &mut Context<Self>) {
+        self.text_scale = text_scale.clamp(1., 2.);
+        cx.notify();
     }
 
     fn reload_groups(&mut self, cx: &mut Context<Self>) {

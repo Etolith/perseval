@@ -5,7 +5,7 @@ pub(super) const FULL_TRACE_DEPTH_INDENT: f32 = Geometry::TREE_INDENT;
 const FULL_TRACE_DISCLOSURE_GUTTER: f32 = 20.;
 const FULL_TRACE_STATUS_RAIL: f32 = 224.;
 const FULL_TRACE_TIMELINE_LABEL: f32 = 320.;
-const FULL_TRACE_EVIDENCE_LANE: f32 = 72.;
+const FULL_TRACE_TIMELINE_ROLE_MAX: f32 = 128.;
 
 pub(super) fn tab_button(
     label: &str,
@@ -445,7 +445,7 @@ pub(super) fn full_trace_timeline_row(
         .clamp(0.006, 1.0 - offset.min(0.994));
     let selected_span = span.clone();
     let role = full_trace_role(span);
-    let (status, _) = span_status(span);
+    let (status, status_tint) = span_status(span);
     let metadata_tint = if selected { Theme::MUTED } else { Theme::DIM };
     div()
         .id(format!("timeline-span-{}", span.span_id))
@@ -492,59 +492,44 @@ pub(super) fn full_trace_timeline_row(
             div()
                 .when(compact, |label| label.w_full())
                 .when(!compact, |label| {
-                    label
-                        .w(px(FULL_TRACE_TIMELINE_LABEL))
-                        .min_w(px(280.))
-                        .flex_none()
+                    label.w(px(FULL_TRACE_TIMELINE_LABEL)).flex_none()
                 })
-                .flex()
-                .items_center()
-                .gap_2()
+                .min_w_0()
                 .child(
                     div()
                         .min_w_0()
-                        .flex_1()
                         .overflow_hidden()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
                                 .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .child(span.name.clone())
-                                .child(execution_tag(&role, execution_role_for_span(span))),
+                                .child(span.name.clone()),
                         )
                         .child(
                             div()
                                 .mt_1()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .text_xs()
                                 .text_color(metadata_tint)
                                 .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(format!(
-                                    "{status} · {:.1} ms",
-                                    span.duration_nano as f64 / 1_000_000.
-                                )),
+                                .child(
+                                    execution_tag(&role, execution_role_for_span(span))
+                                        .max_w(px(FULL_TRACE_TIMELINE_ROLE_MAX))
+                                        .overflow_hidden()
+                                        .text_ellipsis(),
+                                )
+                                .child(div().text_color(status_tint).child(status))
+                                .child(format!("{:.1} ms", span.duration_nano as f64 / 1_000_000.))
+                                .when(evidence, |metadata| {
+                                    metadata.child(tag("Evidence", Theme::AMBER))
+                                }),
                         ),
-                )
-                .child(
-                    div()
-                        .w(px(FULL_TRACE_EVIDENCE_LANE))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .when(evidence, |lane| lane.child(tag("Evidence", Theme::AMBER))),
-                )
-                .when(compact, |label| {
-                    label.child(
-                        div()
-                            .text_xs()
-                            .text_color(metadata_tint)
-                            .child(format!("{:.1} ms", span.duration_nano as f64 / 1_000_000.)),
-                    )
-                }),
+                ),
         )
         .child(
             div()
@@ -564,17 +549,6 @@ pub(super) fn full_trace_timeline_row(
                         .bg(if evidence { Theme::AMBER } else { Theme::CYAN }),
                 ),
         )
-        .when(!compact, |row| {
-            row.child(
-                div()
-                    .w(px(76.))
-                    .flex_none()
-                    .text_right()
-                    .text_xs()
-                    .text_color(metadata_tint)
-                    .child(format!("{:.1} ms", span.duration_nano as f64 / 1_000_000.)),
-            )
-        })
 }
 
 pub(super) fn full_trace_role(span: &SpanRow) -> String {

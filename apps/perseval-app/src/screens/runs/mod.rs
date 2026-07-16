@@ -119,6 +119,7 @@ pub(crate) struct RunsScreen {
     environment_options: Vec<String>,
     build_options: Vec<String>,
     session_options: Vec<String>,
+    text_scale: f32,
 }
 
 impl EventEmitter<RunsEvent> for RunsScreen {}
@@ -152,9 +153,15 @@ impl RunsScreen {
             environment_options: Vec::new(),
             build_options: Vec::new(),
             session_options: Vec::new(),
+            text_scale: 1.,
         };
         screen.reload(cx);
         screen
+    }
+
+    pub(crate) fn set_text_scale(&mut self, text_scale: f32, cx: &mut Context<Self>) {
+        self.text_scale = text_scale.clamp(1., 2.);
+        cx.notify();
     }
 
     pub(crate) fn set_query_scope(&mut self, scope: &QueryScope, cx: &mut Context<Self>) {
@@ -540,9 +547,9 @@ impl RunsScreen {
 
 impl Render for RunsScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = Breakpoint::for_window(window) == Breakpoint::Compact;
-        let rem_size: f32 = window.rem_size().into();
-        let compact_row_height = 112. * (rem_size / 16.).clamp(1., 2.);
+        let width: f32 = window.viewport_size().width.into();
+        let compact = runs_breakpoint(width, self.text_scale) == Breakpoint::Compact;
+        let compact_row_height = 112. * self.text_scale;
         let total = self.total_runs as usize;
         let list = uniform_list(
             "runs-browser-list",
@@ -849,6 +856,10 @@ fn unix_time_nanos() -> u64 {
         .unwrap_or_default()
         .as_nanos()
         .min(u64::MAX as u128) as u64
+}
+
+fn runs_breakpoint(width: f32, text_scale: f32) -> Breakpoint {
+    Breakpoint::for_width(width / text_scale.clamp(1., 2.))
 }
 
 fn lifecycle_label(lifecycle: TraceLifecycle) -> &'static str {

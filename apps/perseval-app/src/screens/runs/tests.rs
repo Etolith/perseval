@@ -78,6 +78,12 @@ fn comparison_rejects_all_projects_cross_project_and_live_runs() {
 }
 
 #[test]
+fn double_text_scale_uses_compact_run_cards() {
+    assert_eq!(runs_breakpoint(1_078., 2.), Breakpoint::Compact);
+    assert_eq!(runs_breakpoint(1_078., 1.), Breakpoint::Standard);
+}
+
+#[test]
 fn time_window_options_are_bounded_and_explicit() {
     let windows = [
         RunTimeWindow::All,

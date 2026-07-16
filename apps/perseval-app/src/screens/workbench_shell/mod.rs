@@ -141,7 +141,12 @@ impl WorkbenchShell {
             .list_projects()
             .expect("list persisted workspace projects");
         let maximum_deltas = config.stream.ui_max_deltas_per_frame;
-        let endpoint = format!("http://{}/v1/traces", config.otlp.bind_addr);
+        let endpoint_address = health
+            .effective_address
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| config.otlp.bind_addr.to_string());
+        let endpoint = format!("http://{endpoint_address}/v1/traces");
         let sources = cx.new(|cx| {
             sources::SourcesScreen::new(
                 service.clone(),
@@ -518,11 +523,16 @@ impl WorkbenchShell {
             .unwrap_or(false);
         let restored_scope = model.state.scope.clone();
         let restored_preferences = model.failure_inbox_preferences();
+        let restored_text_scale = model.state.appearance.text_scale.factor();
         failure_inbox.update(cx, |inbox, cx| {
             inbox.set_query_scope(&restored_scope, cx);
             inbox.set_preferences(restored_preferences, cx);
+            inbox.set_text_scale(restored_text_scale, cx);
         });
-        runs.update(cx, |runs, cx| runs.set_query_scope(&restored_scope, cx));
+        runs.update(cx, |runs, cx| {
+            runs.set_query_scope(&restored_scope, cx);
+            runs.set_text_scale(restored_text_scale, cx);
+        });
         eval_review.update(cx, |evals, cx| {
             evals.set_project_scope(selected_project_id.clone(), cx)
         });
@@ -577,6 +587,12 @@ impl WorkbenchShell {
             settings::SettingsEvent::AppearanceChanged(appearance) => {
                 this.model
                     .apply(WorkbenchAction::SetAppearance(appearance.clone()));
+                this.failure_inbox.update(cx, |inbox, cx| {
+                    inbox.set_text_scale(appearance.text_scale.factor(), cx)
+                });
+                this.runs.update(cx, |runs, cx| {
+                    runs.set_text_scale(appearance.text_scale.factor(), cx)
+                });
                 this.persist();
                 cx.notify();
             }
@@ -600,6 +616,9 @@ impl WorkbenchShell {
                         this.health = status_service
                             .source_health()
                             .unwrap_or_else(|_| this.health.clone());
+                        if let Some(address) = this.health.effective_address.as_deref() {
+                            this.endpoint = format!("http://{address}/v1/traces");
+                        }
                         let health = this.health.clone();
                         this.sources
                             .update(cx, |sources, cx| sources.update_health(health, cx));

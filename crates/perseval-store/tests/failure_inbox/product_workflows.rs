@@ -208,7 +208,8 @@ fn finalized_findings_drive_inbox_evidence_and_selected_candidate() {
 #[test]
 fn group_and_bulk_eval_generation_is_project_scoped_bounded_and_idempotent() {
     let directory = tempdir().unwrap();
-    let store = WorkspaceStore::open(&WorkspaceStoreLayout::new(directory.path()), "test").unwrap();
+    let layout = WorkspaceStoreLayout::new(directory.path());
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
     for project_id in ["checkout", "support"] {
         store
             .create_project(&CreateProjectV1 {
@@ -425,6 +426,7 @@ fn group_and_bulk_eval_generation_is_project_scoped_bounded_and_idempotent() {
         .unwrap();
     assert_eq!(accepted.queue_state, EvalReviewQueueStateV1::Accepted);
     assert_eq!(accepted.candidate.status, EvalCandidateStatus::Accepted);
+    let accepted_id = accepted.candidate.candidate_id.clone();
     assert_eq!(
         accepted.candidate.review.unwrap().reviewer_ref,
         "test-reviewer"
@@ -467,6 +469,21 @@ fn group_and_bulk_eval_generation_is_project_scoped_bounded_and_idempotent() {
             )
             .is_err(),
         "eval generation must reject a project that differs from the immutable scope"
+    );
+
+    drop(store);
+    let reopened = WorkspaceStore::open(&layout, "test").unwrap();
+    let persisted = reopened
+        .list_eval_candidates(Some("checkout"), 0, 20)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.candidate.candidate_id == accepted_id)
+        .unwrap();
+    assert_eq!(persisted.queue_state, EvalReviewQueueStateV1::Accepted);
+    assert_eq!(persisted.candidate.status, EvalCandidateStatus::Accepted);
+    assert_eq!(
+        persisted.candidate.review.unwrap().reviewer_ref,
+        "test-reviewer"
     );
 }
 

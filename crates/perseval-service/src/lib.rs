@@ -29,8 +29,8 @@ pub use perseval_store::{
     FindingDispositionStateV1, FindingDispositionV1, FindingEvidence, IdentityQualityV1,
     OpenAiProviderHealthV1, ProjectV1, QueryScopeCriteriaV1, QueryScopeV1,
     RUN_COMPARISON_REQUEST_SCHEMA_VERSION, ReviewEvalCandidateV1, RunComparisonRequestV1,
-    RunFiltersV1, RunSummary, SourceHealth, SpanRow, SpanTreePageV1, TraceChangeKind, TraceDeltaV1,
-    TraceLifecycle, UNASSIGNED_PROJECT_ID,
+    RunFiltersV1, RunOrderV1, RunSummary, SourceHealth, SpanRow, SpanTreePageV1, TraceChangeKind,
+    TraceDeltaV1, TraceLifecycle, UNASSIGNED_PROJECT_ID,
 };
 pub use queries::{SpanCategory, SpanView, TRACE_FILE_ENV, TraceCatalog, TraceView};
 pub use runtime::{

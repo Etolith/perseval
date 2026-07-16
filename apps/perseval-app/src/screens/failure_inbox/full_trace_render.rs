@@ -207,9 +207,9 @@ impl FailureInbox {
                                             selected,
                                             compact,
                                             if compact {
-                                                72. * text_scale
+                                                76. * text_scale
                                             } else {
-                                                44. * text_scale
+                                                52. * text_scale
                                             },
                                         ),
                                         trace_start,
