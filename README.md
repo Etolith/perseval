@@ -23,11 +23,21 @@ Bring traces in without changing how your agent already runs. Stream OTLP/HTTP
 JSON or protobuf to the loopback receiver, import a bounded trace file, or load
 deterministic demo traces.
 
+![Perseval Sources showing the active project, receiver health, effective endpoint, and local demo](assets/screenshots/sources.png)
+
+Use the **Project** control in the header to switch projects, open a read-only
+all-projects view, create another project, or manage the selected project's
+trace sources.
+
+![Perseval project switcher with two agent projects, an all-projects portfolio view, and source management](assets/screenshots/project-switcher.png)
+
 ### Runs
 
 Stop guessing which agent version produced a bad result. Perseval keeps
 finalized runs separated by session, build, environment, lifecycle, and
 identity, with bounded filtering over the persisted workspace.
+
+![Perseval Runs showing finalized agent builds and sessions](assets/screenshots/runs.png)
 
 ### Failure Inbox
 
@@ -43,6 +53,8 @@ Understand why a failure happened without reading the entire trace. Detector
 diagnoses connect expected, observed, impact, and recovery behavior to ordered
 evidence spans and bounded execution context.
 
+![Perseval investigation showing diagnosis, occurrence navigation, and ordered evidence](assets/screenshots/investigation.png)
+
 ### Full Trace
 
 Follow the complete chain of agent decisions and handoffs when the summary is
@@ -53,6 +65,10 @@ See where the run spent its time and how agent work overlapped. The same loaded
 spans switch into a duration-aligned timeline without reconstructing or
 reloading the trace.
 
+![Perseval expanded multi-agent trace with planner, browser, and verifier roles](assets/screenshots/full-trace-tree.png)
+
+![Perseval duration-aligned trace timeline with concurrent agent work](assets/screenshots/full-trace-timeline.png)
+
 ### Evals
 
 Turn a real failure into a behavior definition your team can review and reuse.
@@ -60,17 +76,25 @@ Perseval generates draft eval definitions from representative findings, with
 expected behavior, graders, evidence references, immutable provenance, and
 explicit human approval.
 
+![Perseval bulk eval preview grouped by source failure](assets/screenshots/eval-generation.png)
+
+![Perseval eval candidate review with evidence provenance](assets/screenshots/eval-review.png)
+
 ### Compare
 
 See whether a code, model, or prompt change actually changed agent behavior.
 Perseval aligns two execution DAGs step by step, identifies their first
 meaningful divergence, and reports explicitly when no divergence is found.
 
+![Perseval aligned baseline and candidate run comparison](assets/screenshots/compare.png)
+
 ### Settings
 
 Keep control of what Perseval stores, reveals, and sends to optional providers.
 Editable workspace policy covers retention, payload previews, local reveal,
 accessibility, and OpenAI provider readiness.
+
+![Perseval editable collection, privacy, analysis, and appearance settings](assets/screenshots/settings.png)
 
 ## Run Perseval
 

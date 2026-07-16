@@ -5,6 +5,25 @@ uses semantic version tags.
 
 ## Unreleased
 
+## 0.1.2 - 2026-07-16
+
+### Added
+
+- Added an explicit project switcher with a read-only all-projects view, new
+  project creation, and direct access to the selected project's trace sources.
+- Restored the public product tour with verified screenshots for Sources, Runs,
+  investigations, full-trace views, eval review, comparison, and Settings.
+
+### Fixed
+
+- Prevented project changes from leaving another project's Compare or Full
+  Trace editor active, and made Sources follow the selected project.
+- Reflowed Failure Inbox and Runs into readable cards at increased text sizes,
+  including the supported 200% setting.
+- Exposed every failure filter as a named radio button or checkbox for assistive
+  technology.
+- Replaced textual pin and project actions with bundled, consistent icons.
+
 ## 0.1.1 - 2026-07-16
 
 ### Fixed

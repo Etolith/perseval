@@ -518,6 +518,9 @@ impl WorkbenchShell {
             crate::workbench::ProjectScope::Project(project_id) => Some(project_id.clone()),
             crate::workbench::ProjectScope::AllProjects => None,
         };
+        if let Some(project_id) = selected_project_id.as_deref() {
+            sources.update(cx, |sources, cx| sources.select_project(project_id, cx));
+        }
         let has_failures = service
             .has_active_findings(selected_project_id.as_deref())
             .unwrap_or(false);
@@ -720,6 +723,18 @@ impl WorkbenchShell {
         cx.notify();
     }
 
+    fn create_project_from_switcher(&mut self, cx: &mut Context<Self>) {
+        self.project_menu_open = false;
+        self.sources
+            .update(cx, |sources, cx| sources.show_project_creation(cx));
+        self.open_activity(ActivityId::Sources, cx);
+    }
+
+    fn manage_project_sources(&mut self, cx: &mut Context<Self>) {
+        self.project_menu_open = false;
+        self.open_activity(ActivityId::Sources, cx);
+    }
+
     fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
         self.project_menu_open = false;
         self.view_menu_open = !self.view_menu_open;
@@ -751,6 +766,10 @@ impl WorkbenchShell {
         self.eval_review.update(cx, |evals, cx| {
             evals.set_project_scope(project_id.clone(), cx)
         });
+        if let Some(project_id) = project_id.as_deref() {
+            self.sources
+                .update(cx, |sources, cx| sources.select_project(project_id, cx));
+        }
         self.refresh_welcome_context(cx);
         self.sync_failure_view(cx);
         self.project_menu_open = false;

@@ -558,7 +558,8 @@ impl RunsScreen {
 impl Render for RunsScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width: f32 = window.viewport_size().width.into();
-        let compact = runs_breakpoint(width, self.text_scale) == Breakpoint::Compact;
+        let compact =
+            runs_use_compact_layout(runs_breakpoint(width, self.text_scale), self.text_scale);
         let compact_row_height = 112. * self.text_scale;
         let total = self.total_runs as usize;
         let list = uniform_list(
@@ -870,6 +871,10 @@ fn unix_time_nanos() -> u64 {
 
 fn runs_breakpoint(width: f32, text_scale: f32) -> Breakpoint {
     Breakpoint::for_width(width / text_scale.clamp(1., 2.))
+}
+
+fn runs_use_compact_layout(breakpoint: Breakpoint, text_scale: f32) -> bool {
+    breakpoint == Breakpoint::Compact || text_scale >= 1.5
 }
 
 fn lifecycle_label(lifecycle: TraceLifecycle) -> &'static str {
