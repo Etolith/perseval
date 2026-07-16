@@ -944,7 +944,7 @@ impl FailureInbox {
                         }
                     )
                 })
-                .unwrap_or_else(|| "This trace was opened without failure context.".into()),
+                .unwrap_or_else(|| missing_telemetry_summary(self.focused_span_snapshot.as_ref())),
             InspectorTab::Span => self
                 .focused_span_snapshot
                 .as_ref()
@@ -1137,5 +1137,122 @@ impl FailureInbox {
                     ),
             )
             .child(body)
+    }
+}
+
+fn missing_telemetry_summary(span: Option<&SpanRow>) -> String {
+    let Some(span) = span else {
+        return "This trace was opened without failure context. Select an error span to inspect why it was not classified as an actionable finding.".into();
+    };
+    if span.status_code != 2 {
+        return "This trace was opened without failure context. Select an error span to inspect its behavioral telemetry.".into();
+    }
+
+    let fact_present = |keys: &[&str]| {
+        span.attributes.iter().any(|(attribute, value)| {
+            keys.iter().any(|key| attribute.eq_ignore_ascii_case(key)) && !value.is_null()
+        })
+    };
+    let mut missing = Vec::new();
+    if !fact_present(&[
+        "agent.operation",
+        "gen_ai.operation.name",
+        "tool.operation",
+        "operation",
+        "operation.name",
+    ]) {
+        missing.push("operation identity");
+    }
+    if !fact_present(&[
+        "agent.tool.requirement",
+        "tool.requirement",
+        "operation.requirement",
+    ]) {
+        missing.push("requiredness");
+    }
+    if !fact_present(&[
+        "agent.tool.status",
+        "gen_ai.tool.status",
+        "tool.status",
+        "tool.result.success",
+        "execution.status",
+    ]) {
+        missing.push("tool result");
+    }
+    if !fact_present(&["agent.operation.effect", "tool.effect", "operation.effect"]) {
+        missing.push("operation effect");
+    }
+    if !fact_present(&[
+        "agent.operation.retry_safety",
+        "tool.retry_safety",
+        "operation.retry_safety",
+    ]) {
+        missing.push("retry safety");
+    }
+    if !fact_present(&[
+        "agent.state.observation",
+        "agent.state.predicate",
+        "agent.state.artifact.id",
+        "tool.state.observation",
+        "tool.state.predicate",
+        "tool.state.artifact.id",
+    ]) {
+        missing.push("state evidence");
+    }
+
+    if missing.is_empty() {
+        "This trace was opened without failure context. The selected error span contains the core behavioral facts, so inspect the root outcome and detector eligibility in Attributes.".into()
+    } else {
+        format!(
+            "This trace was opened without failure context.\n\nThe selected error span could not be classified as actionable. Missing telemetry: {}.\n\nOpen Attributes to inspect the raw facts, then instrument the missing fields and send another run.",
+            missing.join(", ")
+        )
+    }
+}
+
+#[cfg(test)]
+mod missing_telemetry_tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{SpanRow, missing_telemetry_summary};
+
+    fn span(attributes: BTreeMap<String, serde_json::Value>) -> SpanRow {
+        SpanRow {
+            logical_trace_id: "trace".into(),
+            revision: 1,
+            span_id: "span".into(),
+            parent_span_id: None,
+            name: "tool".into(),
+            category: "tool".into(),
+            start_time_unix_nano: 1,
+            duration_nano: 1,
+            status_code: 2,
+            status_message: "failed".into(),
+            depth: 0,
+            has_children: false,
+            attributes,
+            payload_refs: BTreeMap::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn error_only_trace_names_the_missing_behavioral_facts() {
+        let row = span(BTreeMap::from([
+            ("operation".into(), json!("run_tests")),
+            ("tool.name".into(), json!("test_runner")),
+        ]));
+
+        let summary = missing_telemetry_summary(Some(&row));
+
+        assert!(summary.contains("requiredness"));
+        assert!(summary.contains("tool result"));
+        assert!(summary.contains("operation effect"));
+        assert!(summary.contains("retry safety"));
+        assert!(summary.contains("state evidence"));
+        assert!(!summary.contains("operation identity,"));
     }
 }

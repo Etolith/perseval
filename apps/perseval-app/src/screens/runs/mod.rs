@@ -487,9 +487,12 @@ impl RunsScreen {
             .id(("run-row", index))
             .role(Role::Row)
             .aria_label(format!(
-                "{}; {}; {} spans; {} findings; {} errors",
+                "{}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
                 run.title,
                 lifecycle_label(run.lifecycle),
+                run.session_id.as_deref().unwrap_or("Unknown"),
+                run.build_id.as_deref().unwrap_or("Unknown"),
+                run.environment.as_deref().unwrap_or("Unknown"),
                 run.span_count,
                 run.finding_count,
                 run.error_count
@@ -911,6 +914,10 @@ fn merge_run_filter_options(
 
 fn value_or_unknown(value: Option<&str>) -> Div {
     div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
         .text_xs()
         .text_color(if value.is_some() {
             Theme::TEXT
