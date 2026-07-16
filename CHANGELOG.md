@@ -5,6 +5,28 @@ uses semantic version tags.
 
 ## Unreleased
 
+## 0.1.1 - 2026-07-16
+
+### Fixed
+
+- Stabilized the full-trace timeline across normal, inspector-constrained,
+  compact, and increased-text layouts.
+- Preserved eval review state, chronological run ordering, causal comparison,
+  lifecycle visibility, semantic activation, and detector fact scoping across
+  live OTLP and MCP workflows.
+- Clarified error-only investigations by naming the behavioral evidence that
+  instrumentation must capture before Perseval can produce an actionable
+  finding.
+
+### Changed
+
+- Pinned `traces-to-evals` to the repaired observation-time revision.
+- Made release publication depend on formatting, Clippy, tests, dependency
+  auditing, secret-history scanning, application bundle verification, and
+  optional signing and notarization on the tagged revision.
+
+## 0.1.0 - 2026-07-16
+
 ### Added
 
 - Local OTLP/HTTP JSON and protobuf ingestion with durable journaling.
