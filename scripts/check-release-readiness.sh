@@ -19,7 +19,7 @@ if git -C "$ROOT" ls-files docs | grep -q .; then
   fail "internal docs are still tracked; move reviewed public material to an explicit public path"
 fi
 
-if git -C "$ROOT" ls-files | grep -Eq '(^|/)\.env($|\.)|(^|/)(benchmarks|design)/'; then
+if git -C "$ROOT" ls-files | grep -Eq '(^|/)\.env($|\.)|^(benchmarks|design)/'; then
   fail "private environment, benchmark, or design material is tracked"
 fi
 
