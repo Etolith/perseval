@@ -19,13 +19,18 @@ pub(super) fn ensure_logical_trace(
     let environment = string_attr(&span.resource, "deployment.environment.name")
         .or_else(|| string_attr(&span.resource, "deployment.environment"));
     let session_id = string_attr(&span.resource, "gen_ai.conversation.id")
+        .or_else(|| string_attr(&span.attributes, "gen_ai.conversation.id"))
         .or_else(|| string_attr(&span.resource, "session.id"))
-        .or_else(|| string_attr(&span.resource, "openinference.session.id"));
+        .or_else(|| string_attr(&span.attributes, "session.id"))
+        .or_else(|| string_attr(&span.resource, "openinference.session.id"))
+        .or_else(|| string_attr(&span.attributes, "openinference.session.id"));
     let build_id = string_attr(&span.resource, "service.version")
         .or_else(|| string_attr(&span.resource, "deployment.version"))
         .or_else(|| string_attr(&span.resource, "agent.version"));
     let agent_id = string_attr(&span.resource, "gen_ai.agent.id")
-        .or_else(|| string_attr(&span.resource, "agent.id"));
+        .or_else(|| string_attr(&span.attributes, "gen_ai.agent.id"))
+        .or_else(|| string_attr(&span.resource, "agent.id"))
+        .or_else(|| string_attr(&span.attributes, "agent.id"));
     let identity_quality = if project.is_some() {
         IdentityQualityV1::Explicit
     } else {

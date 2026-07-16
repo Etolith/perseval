@@ -92,14 +92,14 @@ impl FailureInbox {
         };
         let service = self.service.clone();
         let finding_id = finding_id.to_owned();
-        self.selected_finding_id = Some(finding_id.clone());
         self.evidence_loading = true;
         self.evidence_request_generation = self.evidence_request_generation.wrapping_add(1);
         let generation = self.evidence_request_generation;
         self.candidate_preview = None;
         self.revealed_payload = None;
+        let requested_finding_id = finding_id.clone();
         let task = cx.background_spawn(async move {
-            service.get_finding_evidence_in_scope(&scope, &group_id, &finding_id)
+            service.get_finding_evidence_in_scope(&scope, &group_id, &requested_finding_id)
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -109,8 +109,9 @@ impl FailureInbox {
                 }
                 this.evidence_loading = false;
                 match result {
-                    Ok(evidence) => {
-                        this.evidence = evidence;
+                    Ok(Some(evidence)) => {
+                        this.selected_finding_id = Some(finding_id);
+                        this.evidence = Some(evidence);
                         this.load_error = None;
                         this.focused_span_id = this.pending_focus_span_id.take().or_else(|| {
                             this.evidence
@@ -126,6 +127,13 @@ impl FailureInbox {
                                 .cloned()
                         });
                         this.tab = InspectorTab::Finding;
+                    }
+                    Ok(None) => {
+                        this.pending_focus_span_id = None;
+                        this.load_error = Some(
+                            "The selected example is no longer available in this failure-group snapshot. The previous example is still shown; refresh the group to reconcile live analysis updates."
+                                .into(),
+                        );
                     }
                     Err(error) => this.load_error = Some(error.to_string()),
                 }

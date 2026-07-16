@@ -213,8 +213,6 @@ impl RunsScreen {
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        self.selected_runs.clear();
-        self.selection_error = None;
         self.request_generation = self.request_generation.wrapping_add(1);
         let generation = self.request_generation;
         self.loading = true;
@@ -238,6 +236,7 @@ impl RunsScreen {
                 match result {
                     Ok((total, first_page)) => {
                         this.total_runs = total;
+                        refresh_selected_runs(&mut this.selected_runs, &first_page);
                         merge_run_filter_options(
                             &first_page,
                             &mut this.environment_options,
@@ -357,6 +356,8 @@ impl RunsScreen {
         }
         self.filters.scope = QueryScopeV1::new(criteria);
         self.open_filter_menu = None;
+        self.selected_runs.clear();
+        self.selection_error = None;
         self.reload(cx);
         cx.emit(RunsEvent::ScopeChanged(self.query_scope()));
     }
@@ -364,12 +365,16 @@ impl RunsScreen {
     fn select_lifecycle(&mut self, value: Option<TraceLifecycle>, cx: &mut Context<Self>) {
         self.filters.lifecycle = value;
         self.open_filter_menu = None;
+        self.selected_runs.clear();
+        self.selection_error = None;
         self.reload(cx);
     }
 
     fn select_identity(&mut self, value: Option<IdentityQualityV1>, cx: &mut Context<Self>) {
         self.filters.identity_quality = value;
         self.open_filter_menu = None;
+        self.selected_runs.clear();
+        self.selection_error = None;
         self.reload(cx);
     }
 
@@ -384,6 +389,8 @@ impl RunsScreen {
         criteria.started_before_unix_nano = None;
         self.filters.scope = QueryScopeV1::new(criteria);
         self.open_filter_menu = None;
+        self.selected_runs.clear();
+        self.selection_error = None;
         self.reload(cx);
         cx.emit(RunsEvent::ScopeChanged(self.query_scope()));
     }
@@ -939,6 +946,18 @@ fn comparison_run_label(run: &RunSummary) -> String {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| short_id(&run.logical_trace_id))
         .to_string()
+}
+
+fn refresh_selected_runs(selected: &mut [RunSummary], visible: &[RunSummary]) {
+    for selected_run in selected {
+        if let Some(updated) = visible.iter().find(|run| {
+            run.project_id == selected_run.project_id
+                && run.logical_trace_id == selected_run.logical_trace_id
+                && run.revision == selected_run.revision
+        }) {
+            *selected_run = updated.clone();
+        }
+    }
 }
 
 fn comparison_request(

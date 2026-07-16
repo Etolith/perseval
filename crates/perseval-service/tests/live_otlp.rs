@@ -36,13 +36,6 @@ fn request() -> ExportTraceServiceRequest {
                         ..Default::default()
                     },
                     KeyValue {
-                        key: "gen_ai.conversation.id".into(),
-                        value: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue("session-42".into())),
-                        }),
-                        ..Default::default()
-                    },
-                    KeyValue {
                         key: "service.version".into(),
                         value: Some(AnyValue {
                             value: Some(any_value::Value::StringValue("build-7".into())),
@@ -67,6 +60,13 @@ fn request() -> ExportTraceServiceRequest {
                     start_time_unix_nano: 1_000_000,
                     end_time_unix_nano: 2_000_000,
                     attributes: vec![
+                        KeyValue {
+                            key: "gen_ai.conversation.id".into(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue("session-42".into())),
+                            }),
+                            ..Default::default()
+                        },
                         KeyValue {
                             key: "gen_ai.operation.name".into(),
                             value: Some(AnyValue {
@@ -895,6 +895,136 @@ async fn accepts_json_gzip_and_reports_permanent_transport_errors() {
         unsupported.status(),
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn documented_json_identity_links_and_mutation_facts_reach_analysis() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = live_config(&temp);
+    config.lifecycle.idle_ms = 100;
+    config.lifecycle.finalization_grace_ms = 100;
+    config.analysis.minimum_findings = 1;
+    let runtime = ServiceRuntime::start_embedded(config).unwrap();
+    let live = runtime.live().unwrap().clone();
+    live.create_project(CreateProjectV1 {
+        project_id: "documented-agent".into(),
+        display_name: "Documented Agent".into(),
+        artifact_namespace: "documented-agent".into(),
+    })
+    .unwrap();
+    let address = live.source_health().unwrap().effective_address.unwrap();
+    let (_, subscription) = runtime.snapshot_and_subscribe().unwrap();
+    let trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let root_span_id = "bbbbbbbbbbbbbbbb";
+    let tool_span_id = "cccccccccccccccc";
+    let payload = serde_json::json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [
+                {"key": "perseval.project.id", "value": {"stringValue": "documented-agent"}},
+                {"key": "service.name", "value": {"stringValue": "documented-agent"}},
+                {"key": "service.version", "value": {"stringValue": "baseline-1"}},
+                {"key": "deployment.environment.name", "value": {"stringValue": "test"}}
+            ]},
+            "scopeSpans": [{"spans": [
+                {
+                    "traceId": trace_id,
+                    "spanId": root_span_id,
+                    "name": "agent.documented_run",
+                    "kind": "SPAN_KIND_INTERNAL",
+                    "startTimeUnixNano": "1000000",
+                    "endTimeUnixNano": "5000000",
+                    "attributes": [
+                        {"key": "gen_ai.conversation.id", "value": {"stringValue": "session-from-root-span"}},
+                        {"key": "gen_ai.agent.id", "value": {"stringValue": "documented-agent-v1"}},
+                        {"key": "agent.role", "value": {"stringValue": "orchestrator"}},
+                        {"key": "agent.final.status", "value": {"stringValue": "completed"}}
+                    ]
+                },
+                {
+                    "traceId": trace_id,
+                    "spanId": tool_span_id,
+                    "parentSpanId": root_span_id,
+                    "name": "tool.persist_research_note",
+                    "kind": "SPAN_KIND_INTERNAL",
+                    "startTimeUnixNano": "2000000",
+                    "endTimeUnixNano": "4000000",
+                    "status": {"code": "STATUS_CODE_ERROR", "message": "timeout after send"},
+                    "attributes": [
+                        {"key": "gen_ai.tool.name", "value": {"stringValue": "research_note_store"}},
+                        {"key": "agent.role", "value": {"stringValue": "publisher"}},
+                        {"key": "agent.operation", "value": {"stringValue": "persist_research_note"}},
+                        {"key": "agent.tool.requirement", "value": {"stringValue": "required"}},
+                        {"key": "agent.tool.status", "value": {"stringValue": "timed_out"}},
+                        {"key": "tool.result.success", "value": {"boolValue": false}},
+                        {"key": "agent.operation.effect", "value": {"stringValue": "mutating"}},
+                        {"key": "agent.operation.retry_safety", "value": {"stringValue": "unknown"}},
+                        {"key": "agent.state.predicate", "value": {"stringValue": "research_note_saved"}},
+                        {"key": "agent.state.observation", "value": {"stringValue": "ambiguous"}}
+                    ],
+                    "links": [{
+                        "traceId": trace_id,
+                        "spanId": root_span_id,
+                        "attributes": [{
+                            "key": "agent.handoff",
+                            "value": {"stringValue": "evidence"}
+                        }]
+                    }]
+                }
+            ]}]
+        }]
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/v1/traces"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&payload).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let finalized = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let committed = subscription.recv().await.unwrap();
+            if committed.change == TraceChangeKind::FindingsCommitted {
+                break committed.summary;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        finalized.session_id.as_deref(),
+        Some("session-from-root-span")
+    );
+    assert!(finalized.finding_count > 0);
+
+    let tool = live
+        .get_span(
+            &finalized.logical_trace_id,
+            finalized.revision,
+            tool_span_id,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(tool.category, "tool");
+    assert_eq!(tool.links.len(), 1);
+    assert_eq!(
+        tool.links[0]
+            .attributes
+            .get("agent.handoff")
+            .and_then(serde_json::Value::as_str),
+        Some("evidence")
+    );
+    let groups = live
+        .list_failure_groups(&FailureFiltersV1::default(), 0, 10)
+        .unwrap();
+    assert!(groups.iter().any(|group| {
+        group
+            .detector_ids
+            .iter()
+            .any(|detector| detector == "uncertain_mutation_state")
+    }));
     runtime.shutdown();
 }
 

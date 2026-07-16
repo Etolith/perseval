@@ -604,14 +604,40 @@ impl FailureInbox {
     }
 
     fn focus_full_trace_span(&mut self, span: SpanRow, cx: &mut Context<Self>) {
-        self.focused_span_id = Some(span.span_id.clone());
+        let span_id = span.span_id.clone();
+        self.focused_span_id = Some(span_id.clone());
         cx.emit(FailureInboxEvent::FullTraceSelectionChanged {
-            span_id: span.span_id.clone(),
+            span_id: span_id.clone(),
         });
         self.focused_span_snapshot = Some(span);
         self.revealed_payload = None;
         self.auto_open_inspector(cx);
         cx.notify();
+
+        let Some((trace_id, revision)) = self.full_trace_identity.clone() else {
+            return;
+        };
+        let service = self.service.clone();
+        let request_trace_id = trace_id.clone();
+        let request_span_id = span_id.clone();
+        let task = cx.background_spawn(async move {
+            service.get_span(&request_trace_id, revision, &request_span_id)
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.full_trace_identity.as_ref() != Some(&(trace_id, revision))
+                    || this.focused_span_id.as_deref() != Some(span_id.as_str())
+                {
+                    return;
+                }
+                if let Ok(Some(span)) = result {
+                    this.focused_span_snapshot = Some(span);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn auto_open_inspector(&mut self, cx: &mut Context<Self>) {
