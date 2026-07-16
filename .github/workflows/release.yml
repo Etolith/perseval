@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos-release:
+    name: Sign, notarize, and publish macOS release
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: release
+    env:
+      CARGO_TERM_COLOR: always
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release policy and tag version
+        run: |
+          scripts/check-release-readiness.sh
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test "${GITHUB_REF_NAME}" = "v${version}"
+
+      - name: Verify the release revision
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --locked
+
+      - name: Import the Developer ID certificate
+        if: ${{ env.MACOS_SIGNING_IDENTITY != '' }}
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/perseval.p12"
+          security create-keychain -p actions "$RUNNER_TEMP/perseval.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/perseval.keychain-db"
+          security unlock-keychain -p actions "$RUNNER_TEMP/perseval.keychain-db"
+          security import "$RUNNER_TEMP/perseval.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$RUNNER_TEMP/perseval.keychain-db"
+          security list-keychain -d user -s "$RUNNER_TEMP/perseval.keychain-db"
+
+      - name: Build and sign Perseval
+        env:
+          PERSEVAL_CODESIGN_IDENTITY: ${{ env.MACOS_SIGNING_IDENTITY }}
+          PERSEVAL_BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package-macos-app.sh
+
+      - name: Notarize and staple
+        if: ${{ env.MACOS_SIGNING_IDENTITY != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent target/macos/Perseval.app "$RUNNER_TEMP/Perseval-notarization.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Perseval-notarization.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple target/macos/Perseval.app
+          xcrun stapler validate target/macos/Perseval.app
+
+      - name: Create release artifacts
+        run: |
+          ditto -c -k --keepParent target/macos/Perseval.app target/macos/Perseval-macOS.zip
+          cd target/macos
+          shasum -a 256 Perseval-macOS.zip > SHA256SUMS
+          if [ -n "$MACOS_SIGNING_IDENTITY" ]; then
+            printf '%s\n' \
+              'This macOS build is Developer ID signed, notarized, and stapled.' \
+              > RELEASE_NOTES.md
+          else
+            printf '%s\n' \
+              'This beta macOS build is ad-hoc signed and is not notarized.' \
+              'macOS may require an explicit user override before first launch.' \
+              > RELEASE_NOTES.md
+          fi
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" target/macos/Perseval-macOS.zip target/macos/SHA256SUMS --verify-tag --generate-notes --notes-file target/macos/RELEASE_NOTES.md

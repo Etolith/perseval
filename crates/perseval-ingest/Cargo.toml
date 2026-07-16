@@ -1,0 +1,24 @@
+[package]
+name = "perseval-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Bounded OTLP/HTTP ingestion for Perseval"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+axum.workspace = true
+flate2.workspace = true
+hex.workspace = true
+opentelemetry-proto.workspace = true
+perseval-store.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+traces-to-evals.workspace = true

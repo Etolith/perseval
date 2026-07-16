@@ -1,0 +1,11 @@
+/target/
+/.perseval/
+/benchmarks/data/
+/benchmarks/results/
+.env
+.env.*
+!.env.example
+.DS_Store
+design/
+docs/
+benchmarks/

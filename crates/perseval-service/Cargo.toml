@@ -1,0 +1,31 @@
+[package]
+name = "perseval-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Perseval application services, analysis scheduling, and live subscriptions"
+publish = false
+
+[dependencies]
+async-channel.workspace = true
+async-trait = "0.1"
+chrono = "0.4"
+directories.workspace = true
+perseval-ingest.workspace = true
+perseval-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+traces-to-evals.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true

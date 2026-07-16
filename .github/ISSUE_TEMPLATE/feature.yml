@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose an improvement to the investigation workflow.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Investigation problem
+      description: What debugging task is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user outcome rather than only a UI control or implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Example
+      description: Use synthetic or redacted data only.

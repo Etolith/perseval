@@ -1,0 +1,51 @@
+schema_version = 1
+workspace_id = "default"
+workspace_dir = ".perseval/default"
+
+[otlp]
+enabled = false
+bind_addr = "127.0.0.1:4318"
+source_id = "otlp-local"
+max_wire_bytes = 16777216
+max_decoded_bytes = 67108864
+max_spans_per_request = 100000
+max_attributes_per_span = 1024
+retry_after_seconds = 1
+
+[stream]
+queue_batches = 64
+queue_bytes = 268435456
+microbatch_spans = 2048
+microbatch_bytes = 8388608
+microbatch_wait_ms = 25
+delta_history = 4096
+subscriber_capacity = 256
+ui_max_deltas_per_frame = 512
+
+[lifecycle]
+idle_ms = 30000
+finalization_grace_ms = 5000
+sweep_ms = 1000
+shutdown_drain_ms = 5000
+
+[query]
+max_run_page = 200
+max_span_page = 500
+cached_pages = 8
+blob_preview_bytes = 1048576
+
+[blobs]
+inline_attribute_bytes = 4096
+
+[mcp]
+read_enabled = true
+compute_enabled = false
+write_enabled = false
+payload_reveal_enabled = false
+default_page_size = 50
+maximum_page_size = 200
+maximum_evidence_spans = 128
+maximum_reveal_bytes = 4096
+maximum_response_bytes = 2097152
+cursor_ttl_seconds = 900
+job_poll_interval_ms = 1000
