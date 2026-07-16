@@ -36,10 +36,10 @@ pub use model::{
     PayloadIdentityV1, PipelineDiagnosticsV1, PipelineStageAggregateV1, PipelineStageSampleV1,
     PipelineStageV1, ProjectV1, QUERY_SCOPE_SCHEMA_VERSION, QueryScopeCriteriaV1, QueryScopeV1,
     RUN_COMPARISON_REQUEST_SCHEMA_VERSION, ReviewEvalCandidateV1, RunComparisonRequestV1,
-    RunFiltersV1, RunSummary, SPAN_UPSERT_SCHEMA_VERSION, SourceHealth, SpanEventV1, SpanLinkV1,
-    SpanRow, SpanTreePageV1, SpanUpsertBatchV1, SpanUpsertV1, TRACE_DELTA_SCHEMA_VERSION,
-    TopologyProjectionJobV1, TopologyProjectionRowV1, TraceChangeKind, TraceDeltaV1,
-    TraceLifecycle, UNASSIGNED_PROJECT_ID,
+    RunFiltersV1, RunOrderV1, RunSummary, SPAN_UPSERT_SCHEMA_VERSION, SourceHealth, SpanEventV1,
+    SpanLinkV1, SpanRow, SpanTreePageV1, SpanUpsertBatchV1, SpanUpsertV1,
+    TRACE_DELTA_SCHEMA_VERSION, TopologyProjectionJobV1, TopologyProjectionRowV1, TraceChangeKind,
+    TraceDeltaV1, TraceLifecycle, UNASSIGNED_PROJECT_ID,
 };
 pub use workspace::{JournalReceipt, StoreError, WorkspaceStore};
 

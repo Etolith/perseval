@@ -73,6 +73,9 @@ impl SourcesScreen {
     }
 
     pub(crate) fn update_health(&mut self, health: SourceHealth, cx: &mut Context<Self>) {
+        if let Some(address) = health.effective_address.as_deref() {
+            self.endpoint = format!("http://{address}/v1/traces");
+        }
         self.health = health;
         cx.notify();
     }
@@ -363,6 +366,13 @@ impl SourcesScreen {
                         self.health.journal_lag,
                         self.health.projection_lag,
                         self.health.rejected_spans
+                    )))
+                    .child(div().mt_2().text_xs().text_color(Theme::MUTED).child(format!(
+                        "run lifecycle: {} live · {} quiescent · {} finalized · {} reopened",
+                        self.health.live_runs,
+                        self.health.quiescent_runs,
+                        self.health.finalized_runs,
+                        self.health.reopened_runs
                     )))
                     .child(
                         div()

@@ -2,7 +2,7 @@ use super::*;
 
 impl WorkspaceStore {
     pub fn list_runs(&self, offset: u64, limit: u32) -> Result<Vec<RunSummary>, StoreError> {
-        self.list_runs_filtered(&RunFiltersV1::default(), offset, limit)
+        self.list_runs_filtered_ordered(&RunFiltersV1::default(), RunOrderV1::Newest, offset, limit)
     }
 
     pub fn list_runs_filtered(
@@ -11,10 +11,28 @@ impl WorkspaceStore {
         offset: u64,
         limit: u32,
     ) -> Result<Vec<RunSummary>, StoreError> {
+        self.list_runs_filtered_ordered(filters, RunOrderV1::Newest, offset, limit)
+    }
+
+    pub fn list_runs_filtered_ordered(
+        &self,
+        filters: &RunFiltersV1,
+        order: RunOrderV1,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<RunSummary>, StoreError> {
         filters.scope.validate().map_err(StoreError::Invalid)?;
         let scope = &filters.scope.criteria;
         let control = self.control.lock().expect("control store lock poisoned");
-        let mut statement = control.prepare(
+        let ordering = match order {
+            RunOrderV1::Newest => "start_time_unix_nano DESC, logical_trace_id",
+            RunOrderV1::Oldest => "start_time_unix_nano ASC, logical_trace_id",
+            RunOrderV1::MostSpans => "span_count DESC, start_time_unix_nano DESC, logical_trace_id",
+            RunOrderV1::MostFindings => {
+                "finding_count DESC, start_time_unix_nano DESC, logical_trace_id"
+            }
+        };
+        let query = format!(
             "SELECT project_id, logical_trace_id, external_trace_id, revision, lifecycle, title,
                     service_name, environment, session_id, build_id, agent_id, identity_quality,
                     start_time_unix_nano, end_time_unix_nano, last_committed_unix_ms,
@@ -29,9 +47,10 @@ impl WorkspaceStore {
                AND (?8 = '' OR identity_quality = ?8)
                AND (?9 IS NULL OR start_time_unix_nano >= ?9)
                AND (?10 IS NULL OR start_time_unix_nano <= ?10)
-             ORDER BY last_committed_unix_ms DESC, logical_trace_id
-             LIMIT ?11 OFFSET ?12",
-        )?;
+             ORDER BY {ordering}
+             LIMIT ?11 OFFSET ?12"
+        );
+        let mut statement = control.prepare(&query)?;
         statement
             .query_map(
                 params![
@@ -93,6 +112,29 @@ impl WorkspaceStore {
             ],
             |row| row.get::<_, i64>(0),
         )? as u64)
+    }
+
+    pub fn lifecycle_counts(&self) -> Result<(u64, u64, u64, u64), StoreError> {
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(CASE WHEN lifecycle = 'live' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN lifecycle = 'quiescent' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN lifecycle = 'finalized' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN lifecycle = 'reopened' THEN 1 ELSE 0 END), 0)
+                 FROM logical_traces WHERE workspace_id = ?1",
+                [&self.workspace_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, i64>(2)? as u64,
+                        row.get::<_, i64>(3)? as u64,
+                    ))
+                },
+            )
+            .map_err(StoreError::from)
     }
 
     pub fn source_totals(&self, source_id: &str) -> Result<(u64, u64), StoreError> {

@@ -53,8 +53,8 @@ use crate::model::{
     FeatureSimilarityCohortSummary, FindingDispositionStateV1, FindingDispositionV1,
     FindingEvidence, IdentityQualityV1, PAYLOAD_IDENTITY_SCHEMA_VERSION, PROJECT_SCHEMA_VERSION,
     PayloadIdentityQualityV1, PayloadIdentityV1, PipelineStageAggregateV1, PipelineStageSampleV1,
-    PipelineStageV1, ProjectV1, ReviewEvalCandidateV1, RunFiltersV1, RunSummary, SpanRow,
-    SpanUpsertBatchV1, SpanUpsertV1, TRACE_DELTA_SCHEMA_VERSION, TopologyProjectionJobV1,
+    PipelineStageV1, ProjectV1, ReviewEvalCandidateV1, RunFiltersV1, RunOrderV1, RunSummary,
+    SpanRow, SpanUpsertBatchV1, SpanUpsertV1, TRACE_DELTA_SCHEMA_VERSION, TopologyProjectionJobV1,
     TopologyProjectionRowV1, TraceChangeKind, TraceDeltaV1, TraceLifecycle, UNASSIGNED_PROJECT_ID,
 };
 

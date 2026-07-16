@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gpui",
@@ -5117,7 +5117,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "duckdb",
  "flate2",
@@ -5139,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-ingest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5158,7 +5158,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "hex",
@@ -5174,7 +5174,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5198,7 +5198,7 @@ dependencies = [
 
 [[package]]
 name = "perseval-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "duckdb",
@@ -7629,7 +7629,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "traces-to-evals"
 version = "0.1.0"
-source = "git+https://github.com/Etolith/traces-to-evals?rev=87f8629cebb65ffe51ef887929ed62c45996f8f1#87f8629cebb65ffe51ef887929ed62c45996f8f1"
+source = "git+https://github.com/Etolith/traces-to-evals?rev=3fb3fa93d25d376c16b8ad5e71b50a3e981e0a9c#3fb3fa93d25d376c16b8ad5e71b50a3e981e0a9c"
 dependencies = [
  "anyhow",
  "async-trait",

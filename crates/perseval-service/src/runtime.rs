@@ -77,7 +77,7 @@ impl ServiceRuntime {
             let (shutdown_sender, shutdown_receiver) = oneshot::channel();
             let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
             let sink = Arc::new(live.ingest_handle());
-            let thread = thread::Builder::new()
+            let thread = match thread::Builder::new()
                 .name("perseval-otlp-http".into())
                 .spawn(move || {
                     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -93,7 +93,19 @@ impl ServiceRuntime {
                         }
                     };
                     runtime.block_on(async move {
-                        match tokio::net::TcpListener::bind(receiver_config.bind_addr).await {
+                        let requested_address = receiver_config.bind_addr;
+                        let listener = match tokio::net::TcpListener::bind(requested_address).await
+                        {
+                            Ok(listener) => Ok(listener),
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::AddrInUse
+                                    && requested_address.port() != 0 =>
+                            {
+                                tokio::net::TcpListener::bind((requested_address.ip(), 0)).await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match listener {
                             Ok(listener) => {
                                 let address =
                                     listener.local_addr().map_err(|error| error.to_string());
@@ -108,12 +120,26 @@ impl ServiceRuntime {
                             }
                         }
                     });
-                })
-                .map_err(|error| RuntimeStartError::Listener(error.to_string()))?;
-            let address = ready_receiver
-                .recv()
-                .map_err(|error| RuntimeStartError::Listener(error.to_string()))?
-                .map_err(RuntimeStartError::Listener)?;
+                }) {
+                Ok(thread) => thread,
+                Err(error) => {
+                    live.shutdown();
+                    return Err(RuntimeStartError::Listener(error.to_string()));
+                }
+            };
+            let address = match ready_receiver.recv() {
+                Ok(Ok(address)) => address,
+                Ok(Err(error)) => {
+                    live.shutdown();
+                    let _ = thread.join();
+                    return Err(RuntimeStartError::Listener(error));
+                }
+                Err(error) => {
+                    live.shutdown();
+                    let _ = thread.join();
+                    return Err(RuntimeStartError::Listener(error.to_string()));
+                }
+            };
             live.set_effective_address(Some(address.to_string()));
             capabilities.otlp_listener = true;
             shutdown = Some(shutdown_sender);
@@ -317,6 +343,35 @@ mod tests {
         assert!(!runtime.capabilities().otlp_listener);
         assert!(runtime.capabilities().stdio_mcp);
         assert!(runtime.live().is_some());
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn embedded_runtime_falls_back_when_requested_otlp_port_is_busy() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let requested_address = occupied.local_addr().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = PersevalConfigV1 {
+            workspace_dir: workspace.path().to_path_buf(),
+            ..PersevalConfigV1::default()
+        };
+        config.otlp.enabled = true;
+        config.otlp.bind_addr = requested_address;
+
+        let runtime = ServiceRuntime::start_embedded(config).unwrap();
+        let effective_address = runtime
+            .live()
+            .unwrap()
+            .source_health()
+            .unwrap()
+            .effective_address
+            .unwrap()
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+
+        assert!(runtime.capabilities().otlp_listener);
+        assert_eq!(effective_address.ip(), requested_address.ip());
+        assert_ne!(effective_address.port(), requested_address.port());
         runtime.shutdown();
     }
 }

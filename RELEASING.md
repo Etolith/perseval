@@ -10,7 +10,7 @@ GitHub Actions builds and tests every pull request on macOS. Tags matching
    pass on the same commit.
 3. Update `CHANGELOG.md` and remove the target version from `Unreleased`.
 4. Confirm the tag exactly matches the workspace version, for example
-   `v0.1.0`.
+   `v0.1.1`.
 
 ## GitHub configuration
 

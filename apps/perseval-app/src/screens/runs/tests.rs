@@ -45,6 +45,22 @@ fn comparison_requires_exactly_two_finalized_runs_in_one_project() {
 }
 
 #[test]
+fn live_refresh_preserves_two_run_comparison_selection() {
+    let mut selected = vec![
+        run("baseline", "checkout", TraceLifecycle::Finalized),
+        run("candidate", "checkout", TraceLifecycle::Finalized),
+    ];
+    let mut refreshed_baseline = selected[0].clone();
+    refreshed_baseline.finding_count = 3;
+
+    refresh_selected_runs(&mut selected, &[refreshed_baseline]);
+
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].finding_count, 3);
+    assert_eq!(selected[1].logical_trace_id, "candidate");
+}
+
+#[test]
 fn comparison_rejects_all_projects_cross_project_and_live_runs() {
     let finalized = run("baseline", "checkout", TraceLifecycle::Finalized);
     assert!(
@@ -75,6 +91,12 @@ fn comparison_rejects_all_projects_cross_project_and_live_runs() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn double_text_scale_uses_compact_run_cards() {
+    assert_eq!(runs_breakpoint(1_078., 2.), Breakpoint::Compact);
+    assert_eq!(runs_breakpoint(1_078., 1.), Breakpoint::Standard);
 }
 
 #[test]

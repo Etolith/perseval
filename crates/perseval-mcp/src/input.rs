@@ -94,6 +94,17 @@ pub(crate) enum RunSort {
     MostFindings,
 }
 
+impl From<RunSort> for perseval_service::RunOrderV1 {
+    fn from(value: RunSort) -> Self {
+        match value {
+            RunSort::Newest => Self::Newest,
+            RunSort::Oldest => Self::Oldest,
+            RunSort::MostSpans => Self::MostSpans,
+            RunSort::MostFindings => Self::MostFindings,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LifecycleInput {

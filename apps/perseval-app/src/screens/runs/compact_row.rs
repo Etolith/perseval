@@ -38,9 +38,12 @@ impl RunsScreen {
             .id(("run-row", index))
             .role(Role::Row)
             .aria_label(format!(
-                "{}; {}; {} spans; {} findings; {} errors",
+                "{}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
                 run.title,
                 lifecycle_label(run.lifecycle),
+                run.session_id.as_deref().unwrap_or("Unknown"),
+                run.build_id.as_deref().unwrap_or("Unknown"),
+                run.environment.as_deref().unwrap_or("Unknown"),
                 run.span_count,
                 run.finding_count,
                 run.error_count

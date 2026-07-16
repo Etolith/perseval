@@ -3,9 +3,11 @@ use super::*;
 
 impl Render for FailureInbox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = Breakpoint::for_window(window) == Breakpoint::Compact;
-        let rem_size: f32 = window.rem_size().into();
-        let text_scale = (rem_size / 16.).clamp(1., 2.);
+        let text_scale = self.text_scale;
+        let width: f32 = window.viewport_size().width.into();
+        let breakpoint = full_trace_breakpoint(width, text_scale);
+        let compact = breakpoint == Breakpoint::Compact;
+        let full_trace_compact = full_trace_uses_compact_layout(breakpoint, self.inspector_open);
         let compact_group_row_height = 112. * text_scale;
         let content = if self.batch_preview.is_some() {
             self.render_eval_batch_preview(compact, cx)
@@ -26,7 +28,7 @@ impl Render for FailureInbox {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_full_trace(compact, text_scale, cx))
+                    .child(self.render_full_trace(full_trace_compact, text_scale, cx))
                     .when(self.inspector_open, |layout| {
                         layout.child(self.render_shared_inspector(false, cx))
                     })
@@ -119,5 +121,32 @@ impl Render for FailureInbox {
                 )
             })
             .child(content)
+    }
+}
+
+fn full_trace_breakpoint(width: f32, text_scale: f32) -> Breakpoint {
+    Breakpoint::for_width(width / text_scale.clamp(1., 2.))
+}
+
+fn full_trace_uses_compact_layout(breakpoint: Breakpoint, inspector_open: bool) -> bool {
+    breakpoint == Breakpoint::Compact || (breakpoint == Breakpoint::Standard && inspector_open)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_trace_compacts_when_inspector_consumes_the_side_lane() {
+        assert!(full_trace_uses_compact_layout(Breakpoint::Standard, true));
+        assert!(!full_trace_uses_compact_layout(Breakpoint::Standard, false));
+        assert!(!full_trace_uses_compact_layout(Breakpoint::Wide, true));
+        assert!(full_trace_uses_compact_layout(Breakpoint::Compact, false));
+    }
+
+    #[test]
+    fn double_text_scale_uses_the_effective_content_width() {
+        assert_eq!(full_trace_breakpoint(1_320., 1.), Breakpoint::Standard);
+        assert_eq!(full_trace_breakpoint(1_320., 2.), Breakpoint::Compact);
     }
 }

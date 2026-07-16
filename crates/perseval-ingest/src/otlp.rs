@@ -541,17 +541,39 @@ fn span_category(attributes: &BTreeMap<String, Value>) -> String {
         }
         .into();
     }
-    match attributes
+    let operation = attributes
         .get("gen_ai.operation.name")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "chat" | "text_completion" | "generate_content" => "llm",
-        "execute_tool" | "tool" => "tool",
-        "invoke_agent" | "agent" => "agent",
-        _ => "other",
+        .unwrap_or_default();
+    match operation {
+        "chat" | "text_completion" | "generate_content" => return "llm".into(),
+        "execute_tool" | "tool" => return "tool".into(),
+        "invoke_agent" | "agent" => return "agent".into(),
+        _ => {}
     }
-    .into()
+    if ["gen_ai.tool.name", "tool.name", "tool_name"]
+        .iter()
+        .any(|key| {
+            attributes
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    {
+        return "tool".into();
+    }
+    if ["gen_ai.agent.id", "agent.id", "agent.role"]
+        .iter()
+        .any(|key| {
+            attributes
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    {
+        return "agent".into();
+    }
+    "other".into()
 }
 
 fn success_response(format: WireFormat, response: &ExportTraceServiceResponse) -> Response {
@@ -641,7 +663,25 @@ mod tests {
                         "kind": "SPAN_KIND_INTERNAL",
                         "startTimeUnixNano": "1",
                         "endTimeUnixNano": "2",
-                        "status": {"code": "STATUS_CODE_ERROR", "message": "timeout"}
+                        "status": {"code": "STATUS_CODE_ERROR", "message": "timeout"},
+                        "attributes": [
+                            {
+                                "key": "gen_ai.tool.name",
+                                "value": {"stringValue": "research_note_store"}
+                            },
+                            {
+                                "key": "agent.role",
+                                "value": {"stringValue": "publisher"}
+                            }
+                        ],
+                        "links": [{
+                            "traceId": "03030303030303030303030303030303",
+                            "spanId": "0404040404040404",
+                            "attributes": [{
+                                "key": "agent.handoff",
+                                "value": {"stringValue": "evidence"}
+                            }]
+                        }]
                     }]
                 }]
             }]
@@ -653,5 +693,17 @@ mod tests {
         let span = &decoded.resource_spans[0].scope_spans[0].spans[0];
         assert_eq!(span.kind, 1);
         assert_eq!(span.status.as_ref().unwrap().code, 2);
+
+        let config = OtlpReceiverConfig::disabled("127.0.0.1:4318".parse().unwrap());
+        let batch = normalize_request(&config, decoded);
+        assert_eq!(batch.spans[0].category, "tool");
+        assert_eq!(batch.spans[0].links.len(), 1);
+        assert_eq!(
+            batch.spans[0].links[0]
+                .attributes
+                .get("agent.handoff")
+                .and_then(Value::as_str),
+            Some("evidence")
+        );
     }
 }
