@@ -278,7 +278,9 @@ impl WorkbenchShell {
                     .child(icon(AppIcon::ChevronDown, 13., self.project_menu_open))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_project_menu(cx))),
             )
-            .when(self.project_menu_open, |switcher| switcher.child(menu))
+            .when(self.project_menu_open, |switcher| {
+                switcher.child(deferred(menu.occlude()).with_priority(1))
+            })
     }
 
     pub(super) fn render_activity_rail(
