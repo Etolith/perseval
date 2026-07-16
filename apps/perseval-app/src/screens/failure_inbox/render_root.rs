@@ -6,7 +6,7 @@ impl Render for FailureInbox {
         let text_scale = self.text_scale;
         let width: f32 = window.viewport_size().width.into();
         let breakpoint = full_trace_breakpoint(width, text_scale);
-        let compact = breakpoint == Breakpoint::Compact;
+        let compact = group_list_uses_compact_layout(breakpoint, text_scale);
         let full_trace_compact = full_trace_uses_compact_layout(breakpoint, self.inspector_open);
         let compact_group_row_height = 112. * text_scale;
         let content = if self.batch_preview.is_some() {
@@ -132,6 +132,10 @@ fn full_trace_uses_compact_layout(breakpoint: Breakpoint, inspector_open: bool) 
     breakpoint == Breakpoint::Compact || (breakpoint == Breakpoint::Standard && inspector_open)
 }
 
+fn group_list_uses_compact_layout(breakpoint: Breakpoint, text_scale: f32) -> bool {
+    breakpoint == Breakpoint::Compact || text_scale >= 1.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +152,12 @@ mod tests {
     fn double_text_scale_uses_the_effective_content_width() {
         assert_eq!(full_trace_breakpoint(1_320., 1.), Breakpoint::Standard);
         assert_eq!(full_trace_breakpoint(1_320., 2.), Breakpoint::Compact);
+    }
+
+    #[test]
+    fn large_text_never_uses_the_fixed_failure_table_columns() {
+        assert!(group_list_uses_compact_layout(Breakpoint::Wide, 2.));
+        assert!(group_list_uses_compact_layout(Breakpoint::Standard, 1.5));
+        assert!(!group_list_uses_compact_layout(Breakpoint::Wide, 1.));
     }
 }

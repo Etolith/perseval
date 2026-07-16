@@ -80,6 +80,25 @@ impl SourcesScreen {
         cx.notify();
     }
 
+    pub(crate) fn select_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if self
+            .projects
+            .iter()
+            .any(|project| project.project_id == project_id)
+        {
+            self.selected_project_id = Some(project_id.to_string());
+            self.import_error = None;
+            self.sample_error = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn show_project_creation(&mut self, cx: &mut Context<Self>) {
+        self.project_creation_open = true;
+        self.project_error = None;
+        cx.notify();
+    }
+
     fn toggle_project_creation(&mut self, cx: &mut Context<Self>) {
         self.project_creation_open = !self.project_creation_open;
         self.project_error = None;

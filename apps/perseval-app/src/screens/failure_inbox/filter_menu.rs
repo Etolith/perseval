@@ -147,15 +147,17 @@ impl FailureInbox {
         .into_iter()
         .enumerate()
         {
+            let label = value
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "All severities".into());
             severity = severity.child(
                 button(
-                    &value
-                        .map(|value| format!("{value:?}"))
-                        .unwrap_or_else(|| "All".into()),
+                    if value.is_some() { &label } else { "All" },
                     self.filters.severity == value,
                 )
                 .id(("severity-option", index))
-                .role(Role::MenuItemRadio)
+                .role(Role::RadioButton)
+                .aria_label(label)
                 .aria_selected(self.filters.severity == value)
                 .on_click(cx.listener(move |this, _, _, cx| this.select_severity(value, cx))),
             );
@@ -172,15 +174,17 @@ impl FailureInbox {
         .into_iter()
         .enumerate()
         {
+            let label = value
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "All recovery states".into());
             recovery = recovery.child(
                 button(
-                    &value
-                        .map(|value| format!("{value:?}"))
-                        .unwrap_or_else(|| "All".into()),
+                    if value.is_some() { &label } else { "All" },
                     self.filters.recovery == value,
                 )
                 .id(("recovery-option", index))
-                .role(Role::MenuItemRadio)
+                .role(Role::RadioButton)
+                .aria_label(label)
                 .aria_selected(self.filters.recovery == value)
                 .on_click(cx.listener(move |this, _, _, cx| this.select_recovery(value, cx))),
             );
@@ -188,7 +192,7 @@ impl FailureInbox {
         recovery = recovery.child(
             button("Include dismissed", self.filters.include_fully_dismissed)
                 .id("include-dismissed-groups")
-                .role(Role::MenuItemCheckBox)
+                .role(Role::CheckBox)
                 .aria_label("Include groups whose current findings are all dismissed")
                 .aria_toggled(if self.filters.include_fully_dismissed {
                     Toggled::True
@@ -202,7 +206,8 @@ impl FailureInbox {
         let mut detectors = filter_section("Detector").child(
             button("All", self.filters.detector_id.is_none())
                 .id("detector-option-all")
-                .role(Role::MenuItemRadio)
+                .role(Role::RadioButton)
+                .aria_label("All detectors")
                 .aria_selected(self.filters.detector_id.is_none())
                 .on_click(cx.listener(|this, _, _, cx| this.select_detector(None, cx))),
         );
@@ -212,7 +217,7 @@ impl FailureInbox {
             detectors = detectors.child(
                 button(&label, active)
                     .id(("detector-option", index))
-                    .role(Role::MenuItemRadio)
+                    .role(Role::RadioButton)
                     .aria_label(label)
                     .aria_selected(active)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -225,7 +230,8 @@ impl FailureInbox {
         let mut services = filter_section("Service").child(
             button("All", self.filters.scope.criteria.service_name.is_none())
                 .id("service-option-all")
-                .role(Role::MenuItemRadio)
+                .role(Role::RadioButton)
+                .aria_label("All services")
                 .aria_selected(self.filters.scope.criteria.service_name.is_none())
                 .on_click(cx.listener(|this, _, _, cx| this.select_service(None, cx))),
         );
@@ -235,7 +241,7 @@ impl FailureInbox {
             services = services.child(
                 button(&value, active)
                     .id(("service-option", index))
-                    .role(Role::MenuItemRadio)
+                    .role(Role::RadioButton)
                     .aria_label(value.clone())
                     .aria_selected(active)
                     .on_click(cx.listener(move |this, _, _, cx| {

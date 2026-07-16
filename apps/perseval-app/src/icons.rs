@@ -14,6 +14,9 @@ pub(crate) enum AppIcon {
     Shield,
     Sparkles,
     Accessibility,
+    ChevronDown,
+    Plus,
+    Pin,
 }
 
 impl AppIcon {
@@ -39,6 +42,12 @@ impl AppIcon {
             (Self::Sparkles, true) => "icons/active/sparkles.svg",
             (Self::Accessibility, false) => "icons/accessibility.svg",
             (Self::Accessibility, true) => "icons/active/accessibility.svg",
+            (Self::ChevronDown, false) => "icons/chevron-down.svg",
+            (Self::ChevronDown, true) => "icons/active/chevron-down.svg",
+            (Self::Plus, false) => "icons/plus.svg",
+            (Self::Plus, true) => "icons/active/plus.svg",
+            (Self::Pin, false) => "icons/pin.svg",
+            (Self::Pin, true) => "icons/active/pin.svg",
         }
     }
 }
@@ -74,6 +83,9 @@ impl AssetSource for PersevalAssets {
             "icons/shield.svg" => Some(include_bytes!("../assets/icons/shield.svg")),
             "icons/sparkles.svg" => Some(include_bytes!("../assets/icons/sparkles.svg")),
             "icons/accessibility.svg" => Some(include_bytes!("../assets/icons/accessibility.svg")),
+            "icons/chevron-down.svg" => Some(include_bytes!("../assets/icons/chevron-down.svg")),
+            "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
+            "icons/pin.svg" => Some(include_bytes!("../assets/icons/pin.svg")),
             _ => None,
         };
         Ok(bytes.map(|bytes| {
@@ -104,6 +116,9 @@ impl AssetSource for PersevalAssets {
             "shield.svg",
             "sparkles.svg",
             "accessibility.svg",
+            "chevron-down.svg",
+            "plus.svg",
+            "pin.svg",
         ]
         .into_iter()
         .map(SharedString::from)
@@ -115,7 +130,7 @@ impl AssetSource for PersevalAssets {
 mod tests {
     use super::*;
 
-    const ICONS: [AppIcon; 10] = [
+    const ICONS: [AppIcon; 13] = [
         AppIcon::Inbox,
         AppIcon::Runs,
         AppIcon::Compare,
@@ -126,6 +141,9 @@ mod tests {
         AppIcon::Shield,
         AppIcon::Sparkles,
         AppIcon::Accessibility,
+        AppIcon::ChevronDown,
+        AppIcon::Plus,
+        AppIcon::Pin,
     ];
 
     #[test]

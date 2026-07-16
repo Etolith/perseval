@@ -110,6 +110,8 @@ impl WorkbenchShell {
             .top(px(38.))
             .right_0()
             .w(px(260.))
+            .max_h(px(420.))
+            .overflow_y_scroll()
             .p_2()
             .rounded(px(6.))
             .border_1()
@@ -118,34 +120,56 @@ impl WorkbenchShell {
             .shadow_lg()
             .child(
                 div()
-                    .id("project-scope-all")
-                    .role(Role::MenuItem)
-                    .aria_selected(self.selected_project_id().is_none())
-                    .aria_label("All Projects, portfolio view, mutations disabled")
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
                     .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(Theme::PANEL_ALT))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("All Projects"),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(Theme::AMBER)
-                            .child("Portfolio view · mutations disabled"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_project_scope(crate::workbench::ProjectScope::AllProjects, cx)
-                    })),
-            );
+                    .pt_1()
+                    .pb_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Theme::MUTED)
+                    .child("Switch project"),
+            )
+            .when(self.projects.is_empty(), |menu| {
+                menu.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(Theme::MUTED)
+                        .child("Create a project to keep its runs, failures, and evals together."),
+                )
+            })
+            .when(!self.projects.is_empty(), |menu| {
+                menu.child(
+                    div()
+                        .id("project-scope-all")
+                        .role(Role::MenuItem)
+                        .aria_selected(self.selected_project_id().is_none())
+                        .aria_label("All Projects, portfolio view, mutations disabled")
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(Theme::PANEL_ALT))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("All Projects"),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(Theme::AMBER)
+                                .child("Portfolio view · mutations disabled"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_project_scope(crate::workbench::ProjectScope::AllProjects, cx)
+                        })),
+                )
+            });
         for (index, project) in self.projects.iter().enumerate() {
             let project_id = project.project_id.clone();
             let selected = self.selected_project_id() == Some(project.project_id.as_str());
@@ -193,6 +217,46 @@ impl WorkbenchShell {
                     })),
             );
         }
+        menu = menu.child(div().my_2().h(px(1.)).bg(Theme::BORDER)).child(
+            div()
+                .id("project-scope-create")
+                .role(Role::MenuItem)
+                .aria_label("Create a new project")
+                .tab_index(0)
+                .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                .h(px(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|style| style.bg(Theme::PANEL_ALT))
+                .child(icon(AppIcon::Plus, 15., false))
+                .child("New project…")
+                .on_click(cx.listener(|this, _, _, cx| this.create_project_from_switcher(cx))),
+        );
+        if self.selected_project_id().is_some() {
+            menu = menu.child(
+                div()
+                    .id("project-scope-manage")
+                    .role(Role::MenuItem)
+                    .aria_label("Manage project trace sources")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                    .h(px(36.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(Theme::PANEL_ALT))
+                    .child(icon(AppIcon::Sources, 15., false))
+                    .child("Manage trace sources")
+                    .on_click(cx.listener(|this, _, _, cx| this.manage_project_sources(cx))),
+            );
+        }
         div()
             .relative()
             .min_w_0()
@@ -205,6 +269,13 @@ impl WorkbenchShell {
                     .tab_index(0)
                     .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
                     .cursor_pointer()
+                    .bg(if self.project_menu_open {
+                        Theme::ACCENT_MUTED
+                    } else {
+                        Theme::PANEL
+                    })
+                    .hover(|style| style.bg(Theme::PANEL_ALT))
+                    .child(icon(AppIcon::ChevronDown, 13., self.project_menu_open))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_project_menu(cx))),
             )
             .when(self.project_menu_open, |switcher| switcher.child(menu))
@@ -324,9 +395,13 @@ impl WorkbenchShell {
                                 .aria_label(format!("Pin {}", tab_title(&tab.resource)))
                                 .tab_index(0)
                                 .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
-                                .px_1()
-                                .text_color(Theme::CYAN)
-                                .child("Pin")
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|style| style.bg(Theme::PANEL_ALT))
+                                .child(icon(AppIcon::Pin, 14., true))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pin_editor(pin_id.clone(), cx)
                                 })),

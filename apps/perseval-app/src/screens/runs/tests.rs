@@ -97,6 +97,9 @@ fn comparison_rejects_all_projects_cross_project_and_live_runs() {
 fn double_text_scale_uses_compact_run_cards() {
     assert_eq!(runs_breakpoint(1_078., 2.), Breakpoint::Compact);
     assert_eq!(runs_breakpoint(1_078., 1.), Breakpoint::Standard);
+    assert!(runs_use_compact_layout(Breakpoint::Wide, 2.));
+    assert!(runs_use_compact_layout(Breakpoint::Standard, 1.5));
+    assert!(!runs_use_compact_layout(Breakpoint::Wide, 1.));
 }
 
 #[test]

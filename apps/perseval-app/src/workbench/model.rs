@@ -244,7 +244,7 @@ impl WorkbenchModel {
             ProjectScope::Project(project_id) => {
                 if let Some(context) = self.state.project_contexts.get(project_id).cloned() {
                     self.state.scope = QueryScope {
-                        project: requested.project,
+                        project: requested.project.clone(),
                         environment: context.environment,
                         build: context.build,
                         session: context.session,
@@ -252,20 +252,33 @@ impl WorkbenchModel {
                     };
                     self.state.active_activity = context.active_activity;
                     self.state.panes = context.panes;
-                    if context
-                        .active_editor
-                        .as_ref()
-                        .is_some_and(|id| self.state.editors.iter().any(|tab| &tab.id == id))
-                    {
+                    if context.active_editor.as_ref().is_some_and(|id| {
+                        self.state.editors.iter().any(|tab| {
+                            &tab.id == id && resource_visible_for_project(&tab.resource, project_id)
+                        })
+                    }) {
                         self.state.active_editor = context.active_editor;
                     } else {
-                        self.state.active_editor = self
+                        let restored_editor = self
                             .state
                             .editors
                             .iter()
-                            .find(|tab| tab.resource.kind().activity() == context.active_activity)
-                            .map(|tab| tab.id.clone())
-                            .or_else(|| self.state.active_editor.clone());
+                            .find(|tab| {
+                                tab.resource.kind().activity() == context.active_activity
+                                    && resource_visible_for_project(&tab.resource, project_id)
+                            })
+                            .map(|tab| tab.id.clone());
+                        self.state.active_editor = Some(
+                            restored_editor.unwrap_or_else(|| self.ensure_failure_inbox_editor()),
+                        );
+                        self.state.active_activity = self
+                            .state
+                            .active_editor
+                            .as_ref()
+                            .and_then(|id| self.state.editors.iter().find(|tab| &tab.id == id))
+                            .map_or(super::ActivityId::Failures, |tab| {
+                                tab.resource.kind().activity()
+                            });
                     }
                 } else {
                     self.state.scope = QueryScope {
@@ -279,12 +292,7 @@ impl WorkbenchModel {
                         .and_then(|id| self.state.editors.iter().find(|tab| &tab.id == id))
                         .is_some_and(|tab| resource_project_id(&tab.resource).is_none());
                     if !active_is_scope_independent {
-                        self.state.active_editor = self
-                            .state
-                            .editors
-                            .iter()
-                            .find(|tab| tab.resource == EditorResource::FailureInbox)
-                            .map(|tab| tab.id.clone());
+                        self.state.active_editor = Some(self.ensure_failure_inbox_editor());
                         self.state.active_activity = super::ActivityId::Failures;
                     }
                 }
@@ -294,9 +302,38 @@ impl WorkbenchModel {
                     project: ProjectScope::AllProjects,
                     ..QueryScope::default()
                 };
+                let active_is_scope_independent = self
+                    .state
+                    .active_editor
+                    .as_ref()
+                    .and_then(|id| self.state.editors.iter().find(|tab| &tab.id == id))
+                    .is_some_and(|tab| resource_project_id(&tab.resource).is_none());
+                if !active_is_scope_independent {
+                    self.state.active_editor = Some(self.ensure_failure_inbox_editor());
+                    self.state.active_activity = super::ActivityId::Failures;
+                }
             }
         }
     }
+
+    fn ensure_failure_inbox_editor(&mut self) -> EditorId {
+        if let Some(tab) = self
+            .state
+            .editors
+            .iter()
+            .find(|tab| tab.resource == EditorResource::FailureInbox)
+        {
+            return tab.id.clone();
+        }
+        let tab = EditorTabState::new(EditorResource::FailureInbox, false);
+        let id = tab.id.clone();
+        self.state.editors.push(tab);
+        id
+    }
+}
+
+fn resource_visible_for_project(resource: &EditorResource, project_id: &str) -> bool {
+    resource_project_id(resource).is_none_or(|resource_project| resource_project == project_id)
 }
 
 fn resource_project_id(resource: &EditorResource) -> Option<&str> {
@@ -320,7 +357,7 @@ const fn pane_focus(pane: PaneId) -> FocusRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workbench::{EditorResource, ProjectScope, QueryScope, WorkbenchAction};
+    use crate::workbench::{ActivityId, EditorResource, ProjectScope, QueryScope, WorkbenchAction};
 
     #[test]
     fn editor_identity_is_stable_and_open_is_idempotent() {
@@ -475,6 +512,52 @@ mod tests {
             model.state.scope.project,
             ProjectScope::Project("first-project".into())
         );
+    }
+
+    #[test]
+    fn switching_projects_never_leaves_an_editor_from_the_previous_project_active() {
+        let mut model = WorkbenchModel::with_initial_editor(EditorResource::Compare {
+            project_id: "alpha".into(),
+            comparison_id: "baseline-candidate".into(),
+        });
+        model.state.scope.project = ProjectScope::Project("alpha".into());
+
+        model.apply(WorkbenchAction::SetScope(QueryScope {
+            project: ProjectScope::Project("beta".into()),
+            ..QueryScope::default()
+        }));
+
+        let active = model
+            .state
+            .active_editor
+            .as_ref()
+            .and_then(|id| model.state.editors.iter().find(|tab| &tab.id == id))
+            .expect("project switch keeps a usable editor");
+        assert_eq!(active.resource, EditorResource::FailureInbox);
+        assert_eq!(model.state.active_activity, ActivityId::Failures);
+    }
+
+    #[test]
+    fn all_projects_scope_exits_project_specific_editors() {
+        let mut model = WorkbenchModel::with_initial_editor(EditorResource::FullTrace {
+            project_id: "alpha".into(),
+            logical_trace_id: "trace".into(),
+            revision: 1,
+            origin: Default::default(),
+            selected_span_id: None,
+        });
+        model.state.scope.project = ProjectScope::Project("alpha".into());
+
+        model.apply(WorkbenchAction::SetScope(QueryScope::default()));
+
+        let active = model
+            .state
+            .active_editor
+            .as_ref()
+            .and_then(|id| model.state.editors.iter().find(|tab| &tab.id == id))
+            .expect("portfolio switch keeps a usable editor");
+        assert_eq!(active.resource, EditorResource::FailureInbox);
+        assert_eq!(model.state.active_activity, ActivityId::Failures);
     }
 
     #[test]
