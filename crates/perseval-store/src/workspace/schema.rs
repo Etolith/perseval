@@ -415,6 +415,18 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
             ON projects(workspace_id, display_name COLLATE NOCASE);
          CREATE INDEX IF NOT EXISTS idx_traces_workspace_project
             ON logical_traces(workspace_id, project_id, last_committed_unix_ms DESC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_started
+            ON logical_traces(workspace_id, start_time_unix_nano DESC, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_spans
+            ON logical_traces(workspace_id, span_count DESC, start_time_unix_nano DESC, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_findings
+            ON logical_traces(workspace_id, finding_count DESC, start_time_unix_nano DESC, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_started
+            ON logical_traces(workspace_id, project_id, start_time_unix_nano DESC, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_spans
+            ON logical_traces(workspace_id, project_id, span_count DESC, start_time_unix_nano DESC, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_findings
+            ON logical_traces(workspace_id, project_id, finding_count DESC, start_time_unix_nano DESC, logical_trace_id);
          CREATE TABLE IF NOT EXISTS trace_comparisons(
             comparison_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -455,7 +467,8 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (14);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (15);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (16);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (17);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (17);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (18);",
     )?;
     ensure_control_column(
         connection,

@@ -293,4 +293,4 @@ Contribution and private
 security-reporting guidance are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and
 [`SECURITY.md`](SECURITY.md).
 
-Perseval is free software licensed under GPL-3.0-or-later. See [LICENSE](https://github.com/Etolith/perseval/blob/main/LICENSE).
+Perseval is free software licensed under GPL-3.0-or-later. See [LICENSE](LICENSE).

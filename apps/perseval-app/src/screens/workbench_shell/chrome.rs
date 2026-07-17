@@ -403,7 +403,7 @@ impl WorkbenchShell {
                                 .justify_center()
                                 .rounded_sm()
                                 .hover(|style| style.bg(Theme::PANEL_ALT))
-                                .child(icon(AppIcon::Pin, 14., true))
+                                .child(icon(AppIcon::Pin, 14., false))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pin_editor(pin_id.clone(), cx)
                                 })),

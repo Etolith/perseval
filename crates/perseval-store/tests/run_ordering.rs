@@ -4,6 +4,7 @@ use perseval_store::{
     RunFiltersV1, RunOrderV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1, SpanUpsertV1,
     WorkspaceStore, WorkspaceStoreLayout,
 };
+use rusqlite::Connection;
 
 fn span(trace_id: &str, span_id: &str, start_time: u64) -> SpanUpsertV1 {
     SpanUpsertV1 {
@@ -97,4 +98,45 @@ fn run_order_is_global_and_applied_before_pagination() {
         .list_runs_filtered_ordered(&RunFiltersV1::default(), RunOrderV1::MostSpans, 0, 1)
         .unwrap();
     assert_eq!(most_spans[0].logical_trace_id, "middle");
+}
+
+#[test]
+fn run_order_indexes_cover_workspace_and_project_sorts() {
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = WorkspaceStoreLayout::new(workspace.path());
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
+    drop(store);
+
+    let connection = Connection::open(layout.control_database()).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_traces_workspace_%'")
+        .unwrap();
+    let indexes = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .unwrap();
+
+    for expected in [
+        "idx_traces_workspace_started",
+        "idx_traces_workspace_spans",
+        "idx_traces_workspace_findings",
+        "idx_traces_workspace_project_started",
+        "idx_traces_workspace_project_spans",
+        "idx_traces_workspace_project_findings",
+    ] {
+        assert!(
+            indexes.contains(expected),
+            "missing run-order index {expected}"
+        );
+    }
+
+    let migrated = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 18)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap();
+    assert!(migrated);
 }

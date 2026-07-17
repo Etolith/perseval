@@ -23,6 +23,8 @@ uses semantic version tags.
 - Exposed every failure filter as a named radio button or checkbox for assistive
   technology.
 - Replaced textual pin and project actions with bundled, consistent icons.
+- Indexed workspace-wide and project-scoped run ordering so chronological,
+  most-spans, and most-findings pages stay efficient as workspaces grow.
 
 ## 0.1.1 - 2026-07-16
 
