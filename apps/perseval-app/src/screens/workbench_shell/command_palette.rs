@@ -81,12 +81,24 @@ impl WorkbenchShell {
                 self.persist();
                 cx.notify();
             }
-            WorkbenchCommand::ShowFailures => self.open_activity(ActivityId::Failures, cx),
-            WorkbenchCommand::ShowRuns => self.open_activity(ActivityId::Runs, cx),
-            WorkbenchCommand::ShowCompare => self.open_activity(ActivityId::Compare, cx),
-            WorkbenchCommand::ShowEvals => self.open_activity(ActivityId::Evals, cx),
-            WorkbenchCommand::ShowSources => self.open_activity(ActivityId::Sources, cx),
-            WorkbenchCommand::ShowSettings => self.open_activity(ActivityId::Settings, cx),
+            WorkbenchCommand::ShowFailures => {
+                self.open_activity_in_window(ActivityId::Failures, window, cx)
+            }
+            WorkbenchCommand::ShowRuns => {
+                self.open_activity_in_window(ActivityId::Runs, window, cx)
+            }
+            WorkbenchCommand::ShowCompare => {
+                self.open_activity_in_window(ActivityId::Compare, window, cx)
+            }
+            WorkbenchCommand::ShowEvals => {
+                self.open_activity_in_window(ActivityId::Evals, window, cx)
+            }
+            WorkbenchCommand::ShowSources => {
+                self.open_activity_in_window(ActivityId::Sources, window, cx)
+            }
+            WorkbenchCommand::ShowSettings => {
+                self.open_activity_in_window(ActivityId::Settings, window, cx)
+            }
             WorkbenchCommand::TogglePrimarySidebar => self.toggle_pane(PaneId::PrimarySidebar, cx),
             WorkbenchCommand::ToggleInspector => self.toggle_pane(PaneId::Inspector, cx),
             WorkbenchCommand::ToggleBottomPanel => self.toggle_pane(PaneId::BottomPanel, cx),

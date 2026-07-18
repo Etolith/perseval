@@ -1,6 +1,11 @@
 use super::*;
 
 impl WorkbenchShell {
+    fn request_visible_repaint(window: &mut Window) {
+        window.refresh();
+        window.request_animation_frame();
+    }
+
     pub(super) fn open_activity(&mut self, activity: ActivityId, cx: &mut Context<Self>) {
         let resource = match activity {
             ActivityId::Failures => EditorResource::FailureInbox,
@@ -15,6 +20,20 @@ impl WorkbenchShell {
         self.persist();
         cx.notify();
         cx.refresh_windows();
+    }
+
+    pub(super) fn open_activity_in_window(
+        &mut self,
+        activity: ActivityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_activity(activity, cx);
+        Self::request_visible_repaint(window);
+    }
+
+    pub(super) fn request_navigation_repaint(window: &mut Window) {
+        Self::request_visible_repaint(window);
     }
 
     pub(super) fn activate_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {

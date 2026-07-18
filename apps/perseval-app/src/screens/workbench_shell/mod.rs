@@ -725,16 +725,16 @@ impl WorkbenchShell {
         cx.refresh_windows();
     }
 
-    fn create_project_from_switcher(&mut self, cx: &mut Context<Self>) {
+    fn create_project_from_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project_menu_open = false;
         self.sources
             .update(cx, |sources, cx| sources.show_project_creation(cx));
-        self.open_activity(ActivityId::Sources, cx);
+        self.open_activity_in_window(ActivityId::Sources, window, cx);
     }
 
-    fn manage_project_sources(&mut self, cx: &mut Context<Self>) {
+    fn manage_project_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project_menu_open = false;
-        self.open_activity(ActivityId::Sources, cx);
+        self.open_activity_in_window(ActivityId::Sources, window, cx);
     }
 
     fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
@@ -782,6 +782,16 @@ impl WorkbenchShell {
         self.persist();
         cx.notify();
         cx.refresh_windows();
+    }
+
+    fn set_project_scope_in_window(
+        &mut self,
+        project: crate::workbench::ProjectScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_project_scope(project, cx);
+        Self::request_navigation_repaint(window);
     }
 
     fn sync_failure_view(&mut self, cx: &mut Context<Self>) {
@@ -945,23 +955,23 @@ impl Render for WorkbenchShell {
             .role(Role::Application)
             .aria_label("Perseval trace investigation workbench")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &OpenFailures, _, cx| {
-                this.open_activity(ActivityId::Failures, cx)
+            .on_action(cx.listener(|this, _: &OpenFailures, window, cx| {
+                this.open_activity_in_window(ActivityId::Failures, window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &OpenRuns, _, cx| this.open_activity(ActivityId::Runs, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenCompare, _, cx| {
-                this.open_activity(ActivityId::Compare, cx)
+            .on_action(cx.listener(|this, _: &OpenRuns, window, cx| {
+                this.open_activity_in_window(ActivityId::Runs, window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &OpenEvals, _, cx| this.open_activity(ActivityId::Evals, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenSources, _, cx| {
-                this.open_activity(ActivityId::Sources, cx)
+            .on_action(cx.listener(|this, _: &OpenCompare, window, cx| {
+                this.open_activity_in_window(ActivityId::Compare, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_activity(ActivityId::Settings, cx)
+            .on_action(cx.listener(|this, _: &OpenEvals, window, cx| {
+                this.open_activity_in_window(ActivityId::Evals, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSources, window, cx| {
+                this.open_activity_in_window(ActivityId::Sources, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_activity_in_window(ActivityId::Settings, window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 this.open_command_palette(window, cx)

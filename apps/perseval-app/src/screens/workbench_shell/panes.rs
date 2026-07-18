@@ -265,9 +265,10 @@ impl WorkbenchShell {
                     .cursor_pointer()
                     .hover(|style| style.bg(Theme::PANEL_ALT))
                     .child(project.display_name.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_project_scope(
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_project_scope_in_window(
                             crate::workbench::ProjectScope::Project(project_id.clone()),
+                            window,
                             cx,
                         )
                     })),
