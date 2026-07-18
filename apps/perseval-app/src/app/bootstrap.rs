@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use gpui::{App, AppContext, Application, Focusable, QuitMode};
+use gpui::{
+    App, AppContext, Application, Focusable, KeyBinding, Menu, MenuItem, QuitMode, actions,
+};
 use perseval_service::{PersevalConfigV1, ServiceRuntime};
 
 use super::runtime_mode::RuntimeMode;
@@ -12,10 +14,18 @@ use crate::screens::workbench_shell::{WorkbenchShell, init_key_bindings};
 
 const PROFILE_STARTUP_ENV: &str = "PERSEVAL_PROFILE_STARTUP";
 
+actions!(perseval_app, [Quit]);
+
 fn application() -> Application {
     gpui_platform::application()
         .with_quit_mode(QuitMode::LastWindowClosed)
         .with_assets(crate::icons::PersevalAssets)
+}
+
+fn init_app_lifecycle(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    cx.set_menus([Menu::new("Perseval").items([MenuItem::action("Quit Perseval", Quit)])]);
 }
 
 pub struct PersevalApp {
@@ -51,6 +61,7 @@ impl PersevalApp {
         }
         let settings = WorkbenchSettings::from_environment();
         application().run(move |cx: &mut App| {
+            init_app_lifecycle(cx);
             init_text_input(cx);
             cx.open_window(workbench_window("Perseval — Trace Workbench"), |_, cx| {
                 cx.new(move |_| TraceFixtureWorkbench::new(catalog, settings, profile_started))
@@ -74,6 +85,7 @@ impl PersevalApp {
             .expect("take initial trace snapshot");
         let runtime_for_window = runtime.clone();
         application().run(move |cx: &mut App| {
+            init_app_lifecycle(cx);
             init_key_bindings(cx);
             init_failure_inbox_key_bindings(cx);
             // Register the context-specific input bindings after global workbench

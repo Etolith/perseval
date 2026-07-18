@@ -117,8 +117,7 @@ impl SourcesScreen {
         };
         self.importing = true;
         self.import_error = None;
-        self.import_confirmation =
-            Some("Choose a bounded OTLP JSON or protobuf trace file…".into());
+        self.import_confirmation = Some("Choose an OTLP JSON or protobuf trace file…".into());
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -162,7 +161,7 @@ impl SourcesScreen {
                         this.import_error = None;
                         this.import_confirmation = Some(if result.duplicate_request {
                             format!(
-                                "{} was already imported; the durable journal stayed unchanged.",
+                                "{} was already imported; nothing changed.",
                                 result.file_name
                             )
                         } else {
@@ -311,7 +310,7 @@ impl SourcesScreen {
                             )
                         });
                         this.project_confirmation = Some(format!(
-                            "Created {}. Add its project attribute before sending traces.",
+                            "Created {}. Copy its project attribute before sending traces.",
                             project.display_name
                         ));
                         this.project_name
@@ -340,13 +339,13 @@ impl SourcesScreen {
             (
                 "Listening",
                 Theme::GREEN,
-                "The loopback OTLP receiver is ready for JSON or protobuf trace batches.",
+                "Ready to receive local OTLP traces.",
             )
         } else {
             (
                 "Receiver disabled",
                 Theme::AMBER,
-                "Enable OTLP in Perseval configuration, then restart the embedded app.",
+                "Turn on the local receiver in Settings.",
             )
         };
         section("Current source")
@@ -378,28 +377,9 @@ impl SourcesScreen {
                             .text_color(Theme::MUTED)
                             .child(detail),
                     )
-                    .child(div().mt_3().text_xs().text_color(Theme::DIM).child(format!(
-                        "queue {}/{} · journal lag {} · projection lag {} · rejected spans {}",
-                        self.health.queue_batches,
-                        self.health.queue_batch_capacity,
-                        self.health.journal_lag,
-                        self.health.projection_lag,
-                        self.health.rejected_spans
-                    )))
-                    .child(div().mt_2().text_xs().text_color(Theme::MUTED).child(format!(
-                        "run lifecycle: {} live · {} quiescent · {} finalized · {} reopened",
-                        self.health.live_runs,
-                        self.health.quiescent_runs,
-                        self.health.finalized_runs,
-                        self.health.reopened_runs
-                    )))
-                    .child(
-                        div()
-                            .mt_2()
-                            .text_xs()
-                            .text_color(Theme::DIM)
-                            .child("Zero queue and projection lag means the trace is durable. A live run still waits for the configured idle and finalization windows before analysis."),
-                    ),
+                    .when_some(self.health.last_error.clone(), |card, error| {
+                        card.child(message(error, Theme::RED))
+                    }),
             )
             .when(self.health.enabled, |card| {
                 card.child(copyable_field(
@@ -439,7 +419,7 @@ impl SourcesScreen {
                     .mt_2()
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("Uses the same durable journal and bounded projection path as live OTLP. Supported: .json, .pb, .protobuf, .bin, and gzip-compressed variants."),
+                    .child("Import OTLP JSON, protobuf, or gzip files into the selected project."),
             )
             .child(read_only_field(
                 "Destination project",
@@ -453,7 +433,7 @@ impl SourcesScreen {
                     .bg(Theme::WARNING_SURFACE)
                     .text_xs()
                     .text_color(Theme::AMBER)
-                    .child("The selected project identity is added explicitly to every imported span. Files over the configured wire-size limit are rejected before reading."),
+                    .child("Perseval tags imported spans with the selected project. Oversized files are rejected."),
             )
             .when_some(self.import_error.clone(), |form, error| {
                 form.child(message(error, Theme::RED))
@@ -578,7 +558,7 @@ impl SourcesScreen {
                     .mt_2()
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("A deterministic, offline OTLP sample: 3 checkout-agent runs and 33 spans across planner, browser, and verifier agents. It includes repeated browser failures and uses the same durable ingestion and traces-to-evals analysis path as your own traces."),
+                    .child("Load 3 offline agent runs with a repeated browser failure."),
             )
             .child(
                 div()
@@ -588,7 +568,7 @@ impl SourcesScreen {
                     .bg(Theme::INFO_SURFACE)
                     .text_xs()
                     .text_color(Theme::CYAN)
-                    .child("Clearly labeled local demo data · no network or model provider is used · loading it again is idempotent"),
+                    .child("Local only. No network or model calls. Loading twice does not create duplicates."),
             )
             .when(self.sample_confirmation_pending, |card| {
                 card.child(
