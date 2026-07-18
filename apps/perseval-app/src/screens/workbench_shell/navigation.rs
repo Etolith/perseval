@@ -2,8 +2,11 @@ use super::*;
 
 impl WorkbenchShell {
     fn request_visible_repaint(window: &mut Window) {
+        window.on_next_frame(|window, cx| {
+            window.refresh();
+            cx.refresh_windows();
+        });
         window.refresh();
-        window.request_animation_frame();
     }
 
     pub(super) fn open_activity(&mut self, activity: ActivityId, cx: &mut Context<Self>) {
@@ -124,5 +127,33 @@ impl WorkbenchShell {
         self.persist();
         cx.notify();
         cx.refresh_windows();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div};
+
+    use super::WorkbenchShell;
+
+    struct RepaintHarness;
+
+    impl Render for RepaintHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn navigation_repaint_is_safe_from_an_event_update(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| RepaintHarness);
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                WorkbenchShell::request_visible_repaint(window)
+            })
+            .expect("request navigation repaint");
+        cx.run_until_parked();
     }
 }
