@@ -28,18 +28,25 @@ impl RunsScreen {
             .any(|candidate| candidate.logical_trace_id == run.logical_trace_id);
         let selected_run = run.clone();
         let title = run.title.clone();
-        let metadata = [run.environment.as_deref(), run.build_id.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let mut metadata = Vec::new();
+        if self.filters.scope.criteria.project_id.is_none() {
+            metadata.push(format!("Project {}", run.project_id));
+        }
+        metadata.extend(
+            [run.environment.as_deref(), run.build_id.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::to_owned),
+        );
+        let metadata = metadata.join(" · ");
 
         div()
             .id(("run-row", index))
             .role(Role::Row)
             .aria_label(format!(
-                "{}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
+                "{}; project {}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
                 run.title,
+                run.project_id,
                 lifecycle_label(run.lifecycle),
                 run.session_id.as_deref().unwrap_or("Unknown"),
                 run.build_id.as_deref().unwrap_or("Unknown"),

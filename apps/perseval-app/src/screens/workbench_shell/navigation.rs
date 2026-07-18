@@ -74,6 +74,13 @@ impl WorkbenchShell {
         cx.refresh_windows();
     }
 
+    pub(super) fn unpin_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
+        self.model.apply(WorkbenchAction::UnpinEditor(id));
+        self.persist();
+        cx.notify();
+        cx.refresh_windows();
+    }
+
     pub(super) fn open_editor(&mut self, resource: EditorResource, pinned: bool) {
         self.model
             .apply(WorkbenchAction::OpenEditor { resource, pinned });

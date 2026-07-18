@@ -395,6 +395,7 @@ impl WorkbenchShell {
                 this.persist();
                 cx.notify();
             }
+            runs::RunsEvent::OpenSources => this.open_activity(ActivityId::Sources, cx),
             runs::RunsEvent::ScopeChanged(scope) => {
                 this.model.apply(WorkbenchAction::SetScope(scope.clone()));
                 let preferences = this.model.failure_inbox_preferences();

@@ -918,6 +918,7 @@ async fn documented_json_identity_links_and_mutation_facts_reach_analysis() {
     let trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let root_span_id = "bbbbbbbbbbbbbbbb";
     let tool_span_id = "cccccccccccccccc";
+    let model_span_id = "dddddddddddddddd";
     let payload = serde_json::json!({
         "resourceSpans": [{
             "resource": {"attributes": [
@@ -927,6 +928,18 @@ async fn documented_json_identity_links_and_mutation_facts_reach_analysis() {
                 {"key": "deployment.environment.name", "value": {"stringValue": "test"}}
             ]},
             "scopeSpans": [{"spans": [
+                {
+                    "traceId": trace_id,
+                    "spanId": model_span_id,
+                    "parentSpanId": root_span_id,
+                    "name": "openai.generate_content",
+                    "kind": "SPAN_KIND_INTERNAL",
+                    "startTimeUnixNano": "1500000",
+                    "endTimeUnixNano": "1750000",
+                    "attributes": [
+                        {"key": "gen_ai.operation.name", "value": {"stringValue": "generate_content"}}
+                    ]
+                },
                 {
                     "traceId": trace_id,
                     "spanId": root_span_id,
@@ -997,6 +1010,8 @@ async fn documented_json_identity_links_and_mutation_facts_reach_analysis() {
         finalized.session_id.as_deref(),
         Some("session-from-root-span")
     );
+    assert_eq!(finalized.agent_id.as_deref(), Some("documented-agent-v1"));
+    assert_eq!(finalized.title, "agent.documented_run");
     assert!(finalized.finding_count > 0);
 
     let tool = live

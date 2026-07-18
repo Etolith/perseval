@@ -90,11 +90,71 @@ fn descriptor<T: JsonSchema>(name: &'static str, title: &str, description: &'sta
 
 fn typed_schema<T: JsonSchema>(id: &str) -> Arc<JsonObject> {
     let mut value = serde_json::to_value(schema_for!(T)).expect("JSON Schema is serializable");
+    inline_local_schema_refs(&mut value);
     let object = value
         .as_object_mut()
         .expect("MCP input schema root is an object");
     object.insert("$id".into(), Value::String(id.into()));
     Arc::new(object.clone())
+}
+
+fn inline_local_schema_refs(value: &mut Value) {
+    let definitions = value
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    inline_schema_node(value, &definitions, &mut Vec::new());
+    if let Some(object) = value.as_object_mut() {
+        object.remove("$defs");
+    }
+}
+
+fn inline_schema_node(
+    value: &mut Value,
+    definitions: &serde_json::Map<String, Value>,
+    resolving: &mut Vec<String>,
+) {
+    let reference = value
+        .as_object()
+        .and_then(|object| object.get("$ref"))
+        .and_then(Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .map(str::to_owned);
+    if let Some(name) = reference
+        && !resolving.contains(&name)
+        && let Some(definition) = definitions.get(&name)
+    {
+        resolving.push(name);
+        let mut replacement = definition.clone();
+        inline_schema_node(&mut replacement, definitions, resolving);
+        resolving.pop();
+        if let (Some(replacement), Some(original)) =
+            (replacement.as_object_mut(), value.as_object())
+        {
+            replacement.extend(
+                original
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "$ref")
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+        }
+        *value = replacement;
+        return;
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                inline_schema_node(value, definitions, resolving);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                inline_schema_node(value, definitions, resolving);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn output_schema(name: &str) -> Arc<JsonObject> {
@@ -190,5 +250,28 @@ mod tests {
             );
         }
         assert!(read_tools(false).is_empty());
+    }
+
+    #[test]
+    fn run_scope_schema_is_inline_and_discoverable() {
+        let tool = read_tools(true)
+            .into_iter()
+            .find(|tool| tool.name == "list_runs")
+            .expect("list_runs descriptor");
+        let scope = tool
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("scope"))
+            .and_then(Value::as_object)
+            .expect("inline scope schema");
+        assert_eq!(scope.get("type"), Some(&json!("object")));
+        let project = scope
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("project"))
+            .and_then(Value::as_object)
+            .expect("inline project selector schema");
+        assert!(project.get("oneOf").is_some());
     }
 }

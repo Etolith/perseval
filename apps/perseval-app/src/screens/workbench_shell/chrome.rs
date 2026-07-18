@@ -402,26 +402,42 @@ impl WorkbenchShell {
                         cx.listener(move |this, _, _, cx| this.activate_editor(id.clone(), cx)),
                     )
                     .child(tab_title(&tab.resource))
-                    .when(!pinned, |tab_view| {
-                        tab_view.child(
-                            div()
-                                .id(("pin-editor", index))
-                                .role(Role::Button)
-                                .aria_label(format!("Pin {}", tab_title(&tab.resource)))
-                                .tab_index(0)
-                                .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
-                                .size(px(24.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_sm()
-                                .hover(|style| style.bg(Theme::PANEL_ALT))
-                                .child(icon(AppIcon::Pin, 14., true))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                    .child(
+                        div()
+                            .id(("pin-editor", index))
+                            .role(Role::Button)
+                            .aria_label(format!(
+                                "{} {}",
+                                if pinned { "Unpin" } else { "Pin" },
+                                tab_title(&tab.resource)
+                            ))
+                            .aria_toggled(if pinned {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .bg(if pinned {
+                                Theme::SELECTED
+                            } else {
+                                Theme::PANEL
+                            })
+                            .hover(|style| style.bg(Theme::PANEL_ALT))
+                            .child(icon(AppIcon::Pin, 14., pinned))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if pinned {
+                                    this.unpin_editor(pin_id.clone(), cx)
+                                } else {
                                     this.pin_editor(pin_id.clone(), cx)
-                                })),
-                        )
-                    })
+                                }
+                            })),
+                    )
                     .child(
                         div()
                             .id(("close-editor", index))

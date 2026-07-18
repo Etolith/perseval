@@ -734,15 +734,17 @@ impl SettingsScreen {
                             .child(if changed {
                                 "Restart required"
                             } else {
-                                "Settings saved"
+                                "No unsaved changes"
                             }),
                     )
                     .child(div().mt_1().text_xs().text_color(Theme::MUTED).child(
                         validation_error.unwrap_or_else(|| {
                             if changed {
                                 "Save to restart Perseval with these changes.".into()
-                            } else {
+                            } else if self.selected_category == SettingsCategory::Appearance {
                                 "Appearance changes apply immediately.".into()
+                            } else {
+                                "Edit a setting to enable Save and restart.".into()
                             }
                         }),
                     )),

@@ -100,6 +100,7 @@ pub(crate) enum RunsEvent {
         revision: u64,
     },
     OpenCompare(RunComparisonRequestV1),
+    OpenSources,
     ScopeChanged(QueryScope),
 }
 
@@ -435,6 +436,7 @@ impl RunsScreen {
             .iter()
             .any(|candidate| candidate.logical_trace_id == run.logical_trace_id);
         let selected_run = run.clone();
+        let all_projects = self.filters.scope.criteria.project_id.is_none();
         let mut cells = vec![
             div()
                 .min_w_0()
@@ -444,6 +446,15 @@ impl RunsScreen {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(run.title.clone()),
                 )
+                .when(all_projects, |cell| {
+                    cell.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(Theme::CYAN)
+                            .child(format!("Project {}", run.project_id)),
+                    )
+                })
                 .child(
                     div()
                         .mt_1()
@@ -487,8 +498,9 @@ impl RunsScreen {
             .id(("run-row", index))
             .role(Role::Row)
             .aria_label(format!(
-                "{}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
+                "{}; project {}; {}; session {}; build {}; environment {}; {} spans; {} findings; {} errors",
                 run.title,
+                run.project_id,
                 lifecycle_label(run.lifecycle),
                 run.session_id.as_deref().unwrap_or("Unknown"),
                 run.build_id.as_deref().unwrap_or("Unknown"),
@@ -562,6 +574,13 @@ impl Render for RunsScreen {
             runs_use_compact_layout(runs_breakpoint(width, self.text_scale), self.text_scale);
         let compact_row_height = 112. * self.text_scale;
         let total = self.total_runs as usize;
+        let filters_active = self.filters.scope.criteria.environment.is_some()
+            || self.filters.scope.criteria.build_id.is_some()
+            || self.filters.scope.criteria.session_id.is_some()
+            || self.filters.lifecycle.is_some()
+            || self.filters.identity_quality.is_some()
+            || self.time_window != RunTimeWindow::All;
+        let has_project_scope = self.filters.scope.criteria.project_id.is_some();
         let list = uniform_list(
             "runs-browser-list",
             total,
@@ -850,11 +869,42 @@ impl Render for RunsScreen {
                 div()
                     .flex_1()
                     .flex()
+                    .flex_col()
                     .items_center()
                     .justify_center()
-                    .text_sm()
-                    .text_color(Theme::MUTED)
-                    .child("No runs match this scope. Reset filters or send a trace.")
+                    .gap_3()
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                        if filters_active {
+                            "No runs match these filters."
+                        } else if has_project_scope {
+                            "No traces yet"
+                        } else {
+                            "No runs yet"
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(Theme::MUTED)
+                            .child(if filters_active {
+                                "Reset the filters to widen this view."
+                            } else if has_project_scope {
+                                "Connect this project in Sources to send its first trace."
+                            } else {
+                                "Create a project in Sources, then send its first trace."
+                            }),
+                    )
+                    .when(!filters_active, |empty| {
+                        empty.child(
+                            button("Open Sources", true)
+                                .id("runs-empty-open-sources")
+                                .role(Role::Button)
+                                .aria_label("Open Sources to add traces")
+                                .on_click(
+                                    cx.listener(|_, _, _, cx| cx.emit(RunsEvent::OpenSources)),
+                                ),
+                        )
+                    })
             } else {
                 div().flex_1().min_h_0().flex().flex_col().child(list)
             })

@@ -425,11 +425,15 @@ impl WorkspaceStore {
                 )?;
             }
             for span in &batch.spans {
-                if !trace_revisions.contains_key(&span.logical_trace_id) {
-                    let revision =
-                        ensure_logical_trace(&transaction, &self.workspace_id, span, now)?;
-                    trace_revisions.insert(span.logical_trace_id.clone(), revision);
-                }
+                let (revision, reopened) =
+                    ensure_logical_trace(&transaction, &self.workspace_id, span, now)?;
+                trace_revisions
+                    .entry(span.logical_trace_id.clone())
+                    .and_modify(|current: &mut (u64, bool)| {
+                        debug_assert_eq!(current.0, revision);
+                        current.1 |= reopened;
+                    })
+                    .or_insert((revision, reopened));
             }
 
             let mut current_versions =

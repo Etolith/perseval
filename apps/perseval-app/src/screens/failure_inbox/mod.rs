@@ -936,7 +936,11 @@ impl FailureInbox {
     }
 
     fn expand_all_loaded_trace_spans(&mut self, cx: &mut Context<Self>) {
+        let parent_ids = self.full_trace_tree.loaded_parent_ids();
         self.full_trace_tree.expand_all_loaded();
+        for parent_id in parent_ids {
+            self.ensure_full_trace_tree_page(Some(parent_id), 0, cx);
+        }
         cx.notify();
     }
 
