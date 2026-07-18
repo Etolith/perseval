@@ -7,14 +7,33 @@ use std::thread;
 
 use perseval_service::{PersevalConfigV1, ServiceRuntime};
 use rmcp::ServiceExt;
+use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use crate::PersevalMcp;
 
-const SOCKET_NAME: &str = ".perseval-mcp-v1.sock";
+const SOCKET_NAME: &str = "workspace.sock";
 
 pub fn socket_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(SOCKET_NAME)
+    let mut hasher = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(workspace_dir.as_os_str().as_bytes());
+    }
+    #[cfg(not(unix))]
+    hasher.update(workspace_dir.as_os_str().to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let directory_name = format!("perseval-mcp-{}", hex::encode(&digest[..8]));
+    let path = std::env::temp_dir().join(&directory_name).join(SOCKET_NAME);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if path.as_os_str().as_bytes().len() >= 100 {
+            return Path::new("/tmp").join(directory_name).join(SOCKET_NAME);
+        }
+    }
+    path
 }
 
 pub async fn run_stdio_entrypoint() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -82,6 +101,23 @@ impl McpWorkspaceServer {
         use std::os::unix::net::UnixStream as StdUnixStream;
 
         let path = socket_path(&config.workspace_dir);
+        let socket_directory = path
+            .parent()
+            .ok_or_else(|| IpcStartError::Runtime("MCP socket directory is unavailable".into()))?;
+        match std::fs::create_dir(socket_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        if !std::fs::symlink_metadata(socket_directory)?
+            .file_type()
+            .is_dir()
+        {
+            return Err(IpcStartError::Runtime(
+                "MCP socket directory is not a directory".into(),
+            ));
+        }
+        std::fs::set_permissions(socket_directory, std::fs::Permissions::from_mode(0o700))?;
         if path.exists() {
             if StdUnixStream::connect(&path).is_ok() {
                 return Err(IpcStartError::AlreadyRunning(path));
@@ -174,6 +210,9 @@ impl McpWorkspaceServer {
             let _ = thread.join();
         }
         let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(directory) = self.socket_path.parent() {
+            let _ = std::fs::remove_dir(directory);
+        }
     }
 }
 
@@ -211,5 +250,29 @@ impl std::error::Error for IpcStartError {}
 impl From<std::io::Error> for IpcStartError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::socket_path;
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_path_is_bounded_independently_of_workspace_depth() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let workspace = std::path::PathBuf::from("/Users/example/Library/Application Support")
+            .join("very-long-workspace-segment-".repeat(20));
+        let path = socket_path(&workspace);
+
+        assert!(
+            path.as_os_str().as_bytes().len() < 100,
+            "{}",
+            path.display()
+        );
+        assert_eq!(path.file_name().unwrap(), "workspace.sock");
+        assert_eq!(path, socket_path(&workspace));
+        assert_ne!(path, socket_path(&workspace.join("other")));
     }
 }

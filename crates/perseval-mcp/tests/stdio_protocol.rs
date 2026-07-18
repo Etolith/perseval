@@ -198,9 +198,13 @@ fn unsupported_protocol_version_is_rejected_without_negotiation_fallback() {
 #[cfg(unix)]
 fn two_stdio_clients_share_the_live_gui_workspace_owner() {
     let workspace = tempfile::tempdir().unwrap();
+    let workspace_dir = workspace
+        .path()
+        .join("long-default-application-support-workspace-segment-".repeat(3));
+    std::fs::create_dir_all(&workspace_dir).unwrap();
     let config = perseval_service::PersevalConfigV1 {
         workspace_id: "default".into(),
-        workspace_dir: workspace.path().to_path_buf(),
+        workspace_dir: workspace_dir.clone(),
         ..perseval_service::PersevalConfigV1::default()
     };
     let runtime = perseval_service::ServiceRuntime::start_embedded(config.clone()).unwrap();
@@ -215,8 +219,8 @@ fn two_stdio_clients_share_the_live_gui_workspace_owner() {
         .unwrap();
     let owner = perseval_mcp::ipc::McpWorkspaceServer::start(&config, runtime.clone()).unwrap();
 
-    let mut first = McpProcess::start(workspace.path());
-    let mut second = McpProcess::start(workspace.path());
+    let mut first = McpProcess::start(&workspace_dir);
+    let mut second = McpProcess::start(&workspace_dir);
     for (id, client) in [(11, &mut first), (12, &mut second)] {
         client.send(json!({
             "jsonrpc": "2.0",
