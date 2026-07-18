@@ -22,6 +22,7 @@ pub(crate) struct SourcesScreen {
     endpoint: String,
     project_name: Entity<TextInput>,
     selected_project_id: Option<String>,
+    portfolio_scope: bool,
     project_creation_open: bool,
     creating: bool,
     importing: bool,
@@ -57,6 +58,7 @@ impl SourcesScreen {
             endpoint,
             project_name,
             selected_project_id,
+            portfolio_scope: false,
             project_creation_open,
             creating: false,
             importing: false,
@@ -87,10 +89,23 @@ impl SourcesScreen {
             .any(|project| project.project_id == project_id)
         {
             self.selected_project_id = Some(project_id.to_string());
+            self.portfolio_scope = false;
             self.import_error = None;
             self.sample_error = None;
             cx.notify();
         }
+    }
+
+    pub(crate) fn select_all_projects(&mut self, cx: &mut Context<Self>) {
+        self.selected_project_id = None;
+        self.portfolio_scope = true;
+        self.project_creation_open = false;
+        self.import_error = None;
+        self.import_confirmation = None;
+        self.sample_confirmation_pending = false;
+        self.sample_error = None;
+        self.sample_confirmation = None;
+        cx.notify();
     }
 
     pub(crate) fn show_project_creation(&mut self, cx: &mut Context<Self>) {
@@ -301,6 +316,7 @@ impl SourcesScreen {
                 match result {
                     Ok(project) => {
                         this.selected_project_id = Some(project.project_id.clone());
+                        this.portfolio_scope = false;
                         this.project_creation_open = false;
                         this.projects.push(project.clone());
                         this.projects.sort_by_key(|project| {
@@ -684,10 +700,16 @@ impl Render for SourcesScreen {
                 .iter()
                 .find(|project| project.project_id == id)
         });
-        let page_title = selected_project
-            .map(|project| format!("Connect traces to {}", project.display_name))
-            .unwrap_or_else(|| "Create your first project".into());
-        let page_description = if selected_project.is_some() {
+        let page_title = if self.portfolio_scope {
+            "All projects is read-only".into()
+        } else {
+            selected_project
+                .map(|project| format!("Connect traces to {}", project.display_name))
+                .unwrap_or_else(|| "Create your first project".into())
+        };
+        let page_description = if self.portfolio_scope {
+            "Select a project to connect traces or import data."
+        } else if selected_project.is_some() {
             "Choose one way to add traces. Project creation is finished and stays out of the way."
         } else {
             "A project keeps one agent system, its builds, traces, findings, and evals in one scope."
@@ -741,41 +763,44 @@ impl Render for SourcesScreen {
                                                     .child(page_description),
                                             ),
                                     )
-                                    .when(!self.projects.is_empty(), |header| {
-                                        header.child(
-                                            div()
-                                                .id("toggle-new-project")
-                                                .role(gpui::Role::Button)
-                                                .aria_label(if self.project_creation_open {
-                                                    "Cancel creating a new project"
-                                                } else {
-                                                    "Create a new project"
-                                                })
-                                                .aria_expanded(self.project_creation_open)
-                                                .tab_index(0)
-                                                .focus_visible(|style| {
-                                                    style.border_2().border_color(Theme::CYAN)
-                                                })
-                                                .h(px(ControlSize::DEFAULT))
-                                                .px_4()
-                                                .flex()
-                                                .items_center()
-                                                .rounded(px(5.))
-                                                .border_1()
-                                                .border_color(Theme::BORDER)
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .cursor_pointer()
-                                                .child(if self.project_creation_open {
-                                                    "Cancel"
-                                                } else {
-                                                    "New project"
-                                                })
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.toggle_project_creation(cx)
-                                                })),
-                                        )
-                                    }),
+                                    .when(
+                                        !self.projects.is_empty() && !self.portfolio_scope,
+                                        |header| {
+                                            header.child(
+                                                div()
+                                                    .id("toggle-new-project")
+                                                    .role(gpui::Role::Button)
+                                                    .aria_label(if self.project_creation_open {
+                                                        "Cancel creating a new project"
+                                                    } else {
+                                                        "Create a new project"
+                                                    })
+                                                    .aria_expanded(self.project_creation_open)
+                                                    .tab_index(0)
+                                                    .focus_visible(|style| {
+                                                        style.border_2().border_color(Theme::CYAN)
+                                                    })
+                                                    .h(px(ControlSize::DEFAULT))
+                                                    .px_4()
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded(px(5.))
+                                                    .border_1()
+                                                    .border_color(Theme::BORDER)
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .cursor_pointer()
+                                                    .child(if self.project_creation_open {
+                                                        "Cancel"
+                                                    } else {
+                                                        "New project"
+                                                    })
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_project_creation(cx)
+                                                    })),
+                                            )
+                                        },
+                                    ),
                             )
                             .when(
                                 self.projects.is_empty() || self.project_creation_open,
@@ -786,6 +811,9 @@ impl Render for SourcesScreen {
                                     .child(self.render_health(cx))
                                     .child(self.render_local_demo(cx))
                                     .child(self.render_import(cx))
+                            })
+                            .when(self.portfolio_scope, |content| {
+                                content.child(self.render_health(cx))
                             }),
                     ),
             )

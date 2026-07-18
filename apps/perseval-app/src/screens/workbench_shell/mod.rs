@@ -769,10 +769,13 @@ impl WorkbenchShell {
         self.eval_review.update(cx, |evals, cx| {
             evals.set_project_scope(project_id.clone(), cx)
         });
-        if let Some(project_id) = project_id.as_deref() {
-            self.sources
-                .update(cx, |sources, cx| sources.select_project(project_id, cx));
-        }
+        self.sources.update(cx, |sources, cx| {
+            if let Some(project_id) = project_id.as_deref() {
+                sources.select_project(project_id, cx);
+            } else {
+                sources.select_all_projects(cx);
+            }
+        });
         self.refresh_welcome_context(cx);
         self.sync_failure_view(cx);
         self.project_menu_open = false;
