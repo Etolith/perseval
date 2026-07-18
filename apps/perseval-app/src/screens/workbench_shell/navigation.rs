@@ -14,6 +14,7 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn activate_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
@@ -22,6 +23,7 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn close_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
@@ -40,12 +42,14 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn pin_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
         self.model.apply(WorkbenchAction::PinEditor(id));
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn open_editor(&mut self, resource: EditorResource, pinned: bool) {
@@ -77,6 +81,7 @@ impl WorkbenchShell {
             self.sync_failure_view(cx);
             self.persist();
             cx.notify();
+            cx.refresh_windows();
         }
     }
 
@@ -87,6 +92,7 @@ impl WorkbenchShell {
             self.sync_failure_view(cx);
             self.persist();
             cx.notify();
+            cx.refresh_windows();
         }
     }
 
@@ -98,5 +104,6 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 }

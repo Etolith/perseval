@@ -186,6 +186,7 @@ impl WorkbenchShell {
                 this.refresh_welcome_context(cx);
                 this.persist();
                 cx.notify();
+                cx.refresh_windows();
             }
             sources::SourcesEvent::TraceImported => {
                 this.refresh_welcome_context(cx);
@@ -721,6 +722,7 @@ impl WorkbenchShell {
         self.view_menu_open = false;
         self.project_menu_open = !self.project_menu_open;
         cx.notify();
+        cx.refresh_windows();
     }
 
     fn create_project_from_switcher(&mut self, cx: &mut Context<Self>) {
@@ -739,6 +741,7 @@ impl WorkbenchShell {
         self.project_menu_open = false;
         self.view_menu_open = !self.view_menu_open;
         cx.notify();
+        cx.refresh_windows();
     }
 
     fn set_project_scope(
@@ -775,6 +778,7 @@ impl WorkbenchShell {
         self.project_menu_open = false;
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     fn sync_failure_view(&mut self, cx: &mut Context<Self>) {
