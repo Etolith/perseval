@@ -175,6 +175,39 @@ fn stdio_initializes_lists_tools_and_returns_structured_safe_data() {
 }
 
 #[test]
+fn codex_protocol_version_initializes_and_lists_tools() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut mcp = McpProcess::start(workspace.path());
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "codex", "version": "0.144.5"}
+        }
+    }));
+    let initialized = mcp.receive();
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    }));
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    }));
+    let tools = mcp.receive();
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 9);
+
+    mcp.close_and_wait(true);
+}
+
+#[test]
 fn unsupported_protocol_version_is_rejected_without_negotiation_fallback() {
     let workspace = tempfile::tempdir().unwrap();
     let mut mcp = McpProcess::start(workspace.path());
@@ -191,6 +224,10 @@ fn unsupported_protocol_version_is_rejected_without_negotiation_fallback() {
     let response = mcp.receive();
     assert!(response.get("error").is_some());
     assert!(response.get("result").is_none());
+    assert_eq!(
+        response["error"]["message"],
+        "Perseval MCP supports protocol versions 2025-06-18 and 2025-11-25"
+    );
     mcp.close_and_wait(false);
 }
 
