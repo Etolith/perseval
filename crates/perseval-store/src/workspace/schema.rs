@@ -561,6 +561,307 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
         "normalized_bytes",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // Migration 18 deliberately keeps learned assessments in their own durable
+    // graph. `analysis_runs` remains the compatibility store for deterministic
+    // findings and is never used as an assessment eligibility gate.
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_context_source_snapshots(
+            source_snapshot_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_locator TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            captured_at_unix_ms INTEGER NOT NULL,
+            manifest_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_context_sources_project
+            ON agent_context_source_snapshots(project_id, captured_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS agent_context_drafts(
+            draft_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source_snapshot_id TEXT NOT NULL,
+            base_release_id TEXT,
+            status TEXT NOT NULL,
+            draft_json TEXT NOT NULL,
+            source_manifest_json TEXT NOT NULL,
+            source_snapshot_digest TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_context_drafts_project
+            ON agent_context_drafts(project_id, status, updated_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS agent_context_releases(
+            context_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source_draft_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            activated_by TEXT NOT NULL,
+            activated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_context_releases_project_agent
+            ON agent_context_releases(project_id, agent_id, activated_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS agent_context_field_provenance(
+            context_release_id TEXT NOT NULL,
+            field_id TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            source_snapshot_id TEXT NOT NULL,
+            source_locator TEXT,
+            review_state TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            confidence REAL,
+            metadata_json TEXT NOT NULL,
+            PRIMARY KEY(context_release_id, field_id)
+         );
+         CREATE TABLE IF NOT EXISTS agent_context_binding_rule_releases(
+            binding_rule_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            rule_json TEXT NOT NULL,
+            activated_by TEXT NOT NULL,
+            activated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS trace_context_bindings(
+            binding_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            resolution TEXT NOT NULL,
+            context_release_id TEXT,
+            binding_rule_release_id TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            binding_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(project_id, logical_trace_id, revision, binding_rule_release_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_context_bindings_target
+            ON trace_context_bindings(project_id, logical_trace_id, revision, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS taxonomy_change_drafts(
+            draft_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            base_release_id TEXT,
+            status TEXT NOT NULL,
+            draft_json TEXT NOT NULL,
+            source_manifest_json TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS taxonomy_releases(
+            taxonomy_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source_draft_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            activated_by TEXT NOT NULL,
+            activated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_taxonomy_releases_project
+            ON taxonomy_releases(project_id, activated_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS taxonomy_nodes(
+            taxonomy_release_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            node_kind TEXT NOT NULL,
+            node_json TEXT NOT NULL,
+            PRIMARY KEY(taxonomy_release_id, node_id)
+         );
+         CREATE TABLE IF NOT EXISTS taxonomy_relations(
+            taxonomy_release_id TEXT NOT NULL,
+            relation_id TEXT NOT NULL,
+            source_node_id TEXT NOT NULL,
+            target_node_id TEXT NOT NULL,
+            relation_kind TEXT NOT NULL,
+            relation_json TEXT NOT NULL,
+            PRIMARY KEY(taxonomy_release_id, relation_id)
+         );
+         CREATE TABLE IF NOT EXISTS taxonomy_assignments(
+            assignment_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            taxonomy_release_id TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            target_revision TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            assignment_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_taxonomy_assignments_target
+            ON taxonomy_assignments(project_id, target_key, target_revision);
+         CREATE TABLE IF NOT EXISTS taxonomy_lineage(
+            taxonomy_release_id TEXT NOT NULL,
+            lineage_id TEXT NOT NULL,
+            operation_kind TEXT NOT NULL,
+            lineage_json TEXT NOT NULL,
+            PRIMARY KEY(taxonomy_release_id, lineage_id)
+         );
+         CREATE TABLE IF NOT EXISTS evaluator_definitions(
+            evaluator_definition_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS evaluator_releases(
+            evaluator_release_id TEXT PRIMARY KEY,
+            evaluator_definition_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 0,
+            activated_by TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            activated_at_unix_ms INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_evaluator_releases_project_active
+            ON evaluator_releases(project_id, active, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS project_assessment_policies(
+            project_id TEXT PRIMARY KEY,
+            policy_json TEXT NOT NULL,
+            provider_enabled INTEGER NOT NULL,
+            daily_budget_micros INTEGER NOT NULL,
+            per_attempt_budget_micros INTEGER NOT NULL,
+            lease_duration_ms INTEGER NOT NULL,
+            maximum_attempts INTEGER NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS assessment_targets(
+            target_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            session_snapshot_id TEXT,
+            target_kind TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            target_revision TEXT NOT NULL,
+            finalized_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(project_id, logical_trace_id, revision, target_kind)
+         );
+         CREATE TABLE IF NOT EXISTS assessment_projections(
+            projection_hash TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            projection_release_id TEXT NOT NULL,
+            context_projection_release_id TEXT NOT NULL,
+            projection_class TEXT NOT NULL,
+            projection_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS assessment_jobs(
+            job_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            selection_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            item_count INTEGER NOT NULL,
+            terminal_count INTEGER NOT NULL DEFAULT 0,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(project_id, idempotency_key)
+         );
+         CREATE INDEX IF NOT EXISTS idx_assessment_jobs_status
+            ON assessment_jobs(status, created_at_unix_ms);
+         CREATE TABLE IF NOT EXISTS assessment_job_items(
+            item_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            context_binding_id TEXT NOT NULL,
+            context_release_id TEXT,
+            projection_hash TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_expires_at_unix_ms INTEGER,
+            next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT 0,
+            terminal_reason TEXT,
+            created_at_unix_ms INTEGER NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(job_id, target_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_assessment_items_claim
+            ON assessment_job_items(status, next_attempt_at_unix_ms, lease_expires_at_unix_ms, created_at_unix_ms);
+         CREATE TABLE IF NOT EXISTS assessment_attempts(
+            attempt_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            lease_owner TEXT NOT NULL,
+            requested_provider TEXT,
+            requested_model TEXT,
+            returned_model TEXT,
+            request_hash TEXT,
+            response_hash TEXT,
+            provider_response_id TEXT,
+            status TEXT NOT NULL,
+            retryable INTEGER NOT NULL DEFAULT 0,
+            reserved_cost_micros INTEGER NOT NULL DEFAULT 0,
+            charged_cost_micros INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            failure_json TEXT,
+            started_at_unix_ms INTEGER NOT NULL,
+            finished_at_unix_ms INTEGER,
+            UNIQUE(item_id, attempt_number)
+         );
+         CREATE TABLE IF NOT EXISTS assessments(
+            assessment_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            context_binding_id TEXT NOT NULL,
+            context_release_id TEXT,
+            projection_hash TEXT NOT NULL,
+            provider TEXT,
+            requested_model TEXT,
+            returned_model TEXT,
+            status TEXT NOT NULL,
+            verdict TEXT,
+            label TEXT,
+            score REAL,
+            confidence REAL,
+            explanation TEXT,
+            abstention_reason TEXT,
+            evaluation_json TEXT,
+            cost_micros INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_assessments_trace
+            ON assessments(project_id, logical_trace_id, revision, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS assessment_evidence_refs(
+            assessment_id TEXT NOT NULL,
+            evidence_index INTEGER NOT NULL,
+            evidence_key TEXT NOT NULL,
+            evidence_kind TEXT NOT NULL,
+            criterion_id TEXT,
+            location_json TEXT NOT NULL,
+            PRIMARY KEY(assessment_id, evidence_index)
+         );
+         CREATE TABLE IF NOT EXISTS assessment_cache_entries(
+            cache_key TEXT PRIMARY KEY,
+            evaluator_release_id TEXT NOT NULL,
+            context_binding_id TEXT NOT NULL,
+            projection_hash TEXT NOT NULL,
+            provider_model_identity TEXT NOT NULL,
+            assessment_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS assessment_daily_budgets(
+            project_id TEXT NOT NULL,
+            utc_day TEXT NOT NULL,
+            reserved_micros INTEGER NOT NULL DEFAULT 0,
+            charged_micros INTEGER NOT NULL DEFAULT 0,
+            updated_at_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY(project_id, utc_day)
+         );
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (18);",
+    )?;
     Ok(())
 }
 

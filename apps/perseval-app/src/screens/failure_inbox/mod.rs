@@ -28,12 +28,13 @@ use gpui::{
 };
 use perseval_service::analysis::{FindingSeverity, RecoveryStatus};
 use perseval_service::{
-    BlobPreviewV1, BlobRefV1, CandidateGenerationJobStatusV1, CandidateGenerationJobV1,
-    EvalBatchPreviewV1, EvalBatchSelectionSpecV1, EvalCandidatePreview, FailureFiltersV1,
-    FailureGroupDetail, FailureGroupSummary, FailureOccurrence, FailureRecurrenceBucketV1,
-    FailureRecurrenceSeriesV1, FindingDispositionStateV1, FindingEvidence, LiveTraceService,
-    QueryScopeCriteriaV1, QueryScopeV1, RunComparisonRequestV1, SourceHealth, SpanRow,
-    TraceChangeKind, TraceSnapshot, TraceSubscription, UNASSIGNED_PROJECT_ID,
+    AssessmentRecordV1, BlobPreviewV1, BlobRefV1, CandidateGenerationJobStatusV1,
+    CandidateGenerationJobV1, EvalBatchPreviewV1, EvalBatchSelectionSpecV1, EvalCandidatePreview,
+    FailureFiltersV1, FailureGroupDetail, FailureGroupSummary, FailureOccurrence,
+    FailureRecurrenceBucketV1, FailureRecurrenceSeriesV1, FindingDispositionStateV1,
+    FindingEvidence, LiveTraceService, QueryScopeCriteriaV1, QueryScopeV1, RunComparisonRequestV1,
+    SourceHealth, SpanRow, TraceChangeKind, TraceSnapshot, TraceSubscription,
+    UNASSIGNED_PROJECT_ID,
 };
 
 use crate::components::{
@@ -105,6 +106,7 @@ pub(crate) enum FailureInboxEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
     Finding,
+    AutomatedReviews,
     Span,
     Attributes,
     Payload,
@@ -160,6 +162,8 @@ pub(crate) struct FailureInbox {
     full_trace_tree: FullTraceTreeModel,
     full_trace_timeline: FullTraceTimelineModel,
     full_trace_identity: Option<(String, u64)>,
+    full_trace_project_id: Option<String>,
+    trace_assessments: Vec<AssessmentRecordV1>,
     full_trace_origin: FullTraceOrigin,
     full_trace_span_count: u64,
     full_trace_loading: bool,
@@ -253,6 +257,8 @@ impl FailureInbox {
             full_trace_tree: FullTraceTreeModel::new(cached_pages),
             full_trace_timeline: FullTraceTimelineModel::new(cached_pages),
             full_trace_identity: None,
+            full_trace_project_id: None,
+            trace_assessments: Vec::new(),
             full_trace_origin: FullTraceOrigin::Runs,
             full_trace_span_count: 0,
             full_trace_loading: false,
@@ -640,6 +646,44 @@ impl FailureInbox {
         .detach();
     }
 
+    fn focus_assessment_evidence_span(&mut self, span_id: String, cx: &mut Context<Self>) {
+        let Some((trace_id, revision)) = self.full_trace_identity.clone() else {
+            return;
+        };
+        self.focused_span_id = Some(span_id.clone());
+        self.focused_span_snapshot = None;
+        self.tab = InspectorTab::Span;
+        cx.emit(FailureInboxEvent::FullTraceSelectionChanged {
+            span_id: span_id.clone(),
+        });
+        let service = self.service.clone();
+        let request_span_id = span_id.clone();
+        let task =
+            cx.background_spawn(
+                async move { service.get_span(&trace_id, revision, &request_span_id) },
+            );
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.focused_span_id.as_deref() != Some(span_id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(Some(span)) => this.focused_span_snapshot = Some(span),
+                    Ok(None) => {
+                        this.load_error = Some(
+                            "The cited evidence span is not present in this exact revision".into(),
+                        )
+                    }
+                    Err(error) => this.load_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn auto_open_inspector(&mut self, cx: &mut Context<Self>) {
         if self.inspector_open || self.inspector_auto_open_suppressed {
             return;
@@ -721,6 +765,7 @@ impl FailureInbox {
             span_id: self.focused_span_id.clone(),
         };
         self.show_full_trace(
+            &project_id,
             &trace_id,
             revision,
             origin.clone(),
@@ -737,6 +782,7 @@ impl FailureInbox {
 
     pub(crate) fn show_full_trace(
         &mut self,
+        project_id: &str,
         trace_id: &str,
         revision: u64,
         origin: FullTraceOrigin,
@@ -786,6 +832,7 @@ impl FailureInbox {
             self.focused_span_snapshot = None;
         }
         if self.full_trace
+            && self.full_trace_project_id.as_deref() == Some(project_id)
             && self.full_trace_identity.as_ref() == Some(&(trace_id.to_owned(), revision))
             && self.full_trace_tree.has_page(&TreePageKey::new(None, 0))
         {
@@ -794,6 +841,7 @@ impl FailureInbox {
             return;
         }
         let service = self.service.clone();
+        let project_id = project_id.to_owned();
         let trace_id = trace_id.to_owned();
         self.full_trace_errors_only = false;
         self.full_trace_search.update(cx, |input, cx| {
@@ -804,6 +852,8 @@ impl FailureInbox {
         self.full_trace_start_unix_nano = 0;
         self.full_trace_end_unix_nano = 1;
         self.full_trace_identity = Some((trace_id.clone(), revision));
+        self.full_trace_project_id = Some(project_id.clone());
+        self.trace_assessments.clear();
         self.full_trace_origin = origin;
         self.full_trace_span_count = 0;
         self.full_trace_loading = true;
@@ -817,7 +867,14 @@ impl FailureInbox {
             let first_page = service.span_tree_page(&trace_id, revision, None, 0, 500)?;
             let timeline = service.list_spans_timeline(&trace_id, revision, 0, 500, None, false)?;
             let run = service.get_run(&trace_id)?;
-            Ok::<_, perseval_service::LiveServiceError>((count, first_page, timeline, run))
+            let assessments = service.list_trace_assessments(&project_id, &trace_id, revision)?;
+            Ok::<_, perseval_service::LiveServiceError>((
+                count,
+                first_page,
+                timeline,
+                run,
+                assessments,
+            ))
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -827,7 +884,7 @@ impl FailureInbox {
                 }
                 this.full_trace_loading = false;
                 match result {
-                    Ok((count, first_page, timeline, run)) => {
+                    Ok((count, first_page, timeline, run, assessments)) => {
                         this.full_trace_span_count = count;
                         this.full_trace_timeline.set_total(count);
                         this.full_trace_timeline.finish_load(0, timeline);
@@ -839,6 +896,7 @@ impl FailureInbox {
                                 .end_time_unix_nano
                                 .max(run.start_time_unix_nano.saturating_add(1));
                         }
+                        this.trace_assessments = assessments;
                     }
                     Err(error) => this.load_error = Some(error.to_string()),
                 }

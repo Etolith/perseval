@@ -1,5 +1,7 @@
 mod analysis;
+mod assessments;
 mod comparison;
+mod context;
 mod diagnostics;
 mod ingest;
 mod projection;
@@ -7,6 +9,7 @@ mod projects;
 mod read;
 mod schema;
 mod span_tree;
+mod taxonomy;
 mod topology;
 
 use projection::{

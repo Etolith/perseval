@@ -43,6 +43,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
 tower = "0.5"
-traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "3fb3fa93d25d376c16b8ad5e71b50a3e981e0a9c", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }
+traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "59cf3031e5eb5e820881d41ad2e06be299e3fbba", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }
 unicode-segmentation = "1.12"
 zstd = "0.13"

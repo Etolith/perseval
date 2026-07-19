@@ -58,6 +58,47 @@ pub(super) fn setting_row(label: &str, value: String, stacked: bool) -> gpui::Di
         )
 }
 
+/// A review row intentionally shows the complete value. It is used for
+/// immutable artifacts that a human must be able to read before activation;
+/// ordinary status rows stay compact through `setting_row`.
+pub(super) fn review_row(
+    label: &str,
+    value: String,
+    detail: String,
+    stacked: bool,
+) -> impl IntoElement {
+    let accessible_label = format!("{label}. {value}. {detail}");
+    div()
+        .id(accessible_label.clone())
+        .role(Role::Group)
+        .aria_label(accessible_label)
+        .mt_4()
+        .pt_4()
+        .border_t_1()
+        .border_color(Theme::BORDER)
+        .flex()
+        .when(stacked, |row| row.flex_col().gap_2())
+        .when(!stacked, |row| row.items_start().gap_5())
+        .child(
+            div()
+                .w(px(190.))
+                .when(stacked, |label| label.w_full())
+                .flex_none()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_left()
+                .child(div().text_xs().text_color(Theme::TEXT).child(value))
+                .child(div().mt_2().text_xs().text_color(Theme::DIM).child(detail)),
+        )
+}
+
 pub(super) fn editable_row(
     label: &str,
     detail: &str,
