@@ -9,6 +9,7 @@ description = "Perseval application services, analysis scheduling, and live subs
 publish = false
 
 [dependencies]
+anyhow = "1"
 async-channel.workspace = true
 async-trait = "0.1"
 chrono = "0.4"

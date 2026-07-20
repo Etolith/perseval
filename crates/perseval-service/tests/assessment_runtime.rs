@@ -1,26 +1,39 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
-use perseval_service::assessments::{FoundationAssessmentExecutor, LearnedAssessmentExecutor};
-use perseval_service::{LiveTraceService, PersevalConfigV1};
+use perseval_service::assessments::{
+    FoundationAssessmentExecutor, LearnedAssessmentExecutor, TaskCompletionAssessmentExecutor,
+    TaskCompletionEvaluationRunner,
+};
+use perseval_service::{LiveTraceService, PersevalConfigV1, TaskCompletionQualityCheckDraftV1};
 use perseval_store::{
-    AssessmentCommitV1, AssessmentItemStatusV1, CreateProjectV1,
-    PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1, ReviewAuthorityV1,
-    SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1, SpanUpsertV1, UNASSIGNED_PROJECT_ID,
-    WorkspaceStore, WorkspaceStoreLayout,
+    ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION, AssessmentCommitV1, AssessmentItemStatusV1,
+    AssessmentSamplingPolicyV1, CreateProjectV1, PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION,
+    ProjectAssessmentPolicyV1, ReviewAuthorityV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1,
+    SpanUpsertV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionReleaseConfigV1,
+    UNASSIGNED_PROJECT_ID, WorkspaceStore, WorkspaceStoreLayout,
 };
 use serde_json::json;
 use tempfile::TempDir;
 use traces_to_evals::{
     AGENT_CONTEXT_RELEASE_SCHEMA_VERSION, AgentArchitectureContextV1, AgentContextReleaseV1,
     AgentEvaluationContextV1, AgentIdentityContextV1, AgentIntentContextV1, AgentPolicyContextV1,
-    ContextFieldMetadataV1, ContextFieldProvenanceV1, ContextFieldV1, ContextReviewStateV1,
-    ContextSensitivityV1, EVALUATOR_RELEASE_SCHEMA_VERSION, EvaluationEvidenceCatalogV1,
+    ContextFieldMetadataV1, ContextFieldProvenanceV1, ContextFieldV1, ContextProjectionClassV1,
+    ContextProjectionV1, ContextReviewStateV1, ContextSensitivityV1,
+    EVALUATOR_RELEASE_SCHEMA_VERSION, EvaluationCriterionV1, EvaluationEvidenceCatalogV1,
     EvaluationEvidenceCitationV1, EvaluationEvidenceKindV1, EvaluationEvidenceLocationV1,
     EvaluationEvidenceRecordV1, EvaluationImplementationV1, EvaluationInputBoundsV1,
     EvaluationTargetKind, EvaluatorReleaseSpecV1, LEARNED_EVALUATION_SCHEMA_VERSION,
-    LearnedEvaluationV1, LearnedTaskKind, LearnedVerdictV1, ProviderResponseEnvelopeV1,
+    LearnedEvaluationV1, LearnedTaskKind, LearnedVerdictV1, ProviderExecutionFailureV1,
+    ProviderExecutionStageV1, ProviderResponseEnvelopeV1, ProviderTokenUsageV1,
+    SuccessCriterionImportanceV1, SuccessCriterionV1, TaskCompletionContentPolicyV1,
+    TaskCompletionExecutionV1, TaskCompletionProjectionV1, TaskCompletionProjectorV1,
+    TraceContextBindingV1, task_completion_judgment_response_schema,
 };
 
 fn digest(byte: char) -> String {
@@ -45,6 +58,12 @@ fn field(id: &str, value: serde_json::Value, source_snapshot_id: &str) -> Contex
 }
 
 fn context_release(source_snapshot_id: &str, purpose: &str) -> AgentContextReleaseV1 {
+    let success_metadata = field(
+        "success_response",
+        json!("The request is answered with observed evidence"),
+        source_snapshot_id,
+    )
+    .metadata;
     AgentContextReleaseV1 {
         schema_version: AGENT_CONTEXT_RELEASE_SCHEMA_VERSION.into(),
         agent_id: "agent-a".into(),
@@ -71,7 +90,14 @@ fn context_release(source_snapshot_id: &str, purpose: &str) -> AgentContextRelea
                 source_snapshot_id,
             )],
             explicit_non_goals: Vec::new(),
-            success_criteria: Vec::new(),
+            success_criteria: vec![SuccessCriterionV1 {
+                metadata: success_metadata,
+                criterion_id: "criterion-answer-request".into(),
+                description: "The request is answered with observed evidence".into(),
+                importance: SuccessCriterionImportanceV1::Must,
+                required_evidence_kinds: BTreeSet::from(["span".into()]),
+                business_impact_weight: Some(1.0),
+            }],
             acceptable_partial_completion: None,
             refusal_requirements: Vec::new(),
             escalation_requirements: Vec::new(),
@@ -149,6 +175,20 @@ fn span() -> SpanUpsertV1 {
     }
 }
 
+fn tool_span() -> SpanUpsertV1 {
+    SpanUpsertV1 {
+        external_span_id: "span-tool".into(),
+        external_parent_span_id: Some("span-a".into()),
+        name: "write_file".into(),
+        category: "tool".into(),
+        span_kind: 2,
+        start_time_unix_nano: 12,
+        end_time_unix_nano: 18,
+        observed_at_unix_nano: 18,
+        ..span()
+    }
+}
+
 fn setup() -> (TempDir, WorkspaceStore) {
     let directory = tempfile::tempdir().unwrap();
     let layout = WorkspaceStoreLayout::new(directory.path());
@@ -164,7 +204,7 @@ fn setup() -> (TempDir, WorkspaceStore) {
         schema_version: SPAN_UPSERT_SCHEMA_VERSION.into(),
         source_id: "test".into(),
         received_at_unix_ms: 1,
-        spans: vec![span()],
+        spans: vec![span(), tool_span()],
         rejected_spans: 0,
         rejection_message: None,
     };
@@ -179,6 +219,10 @@ fn setup() -> (TempDir, WorkspaceStore) {
 }
 
 fn activate_context(store: &WorkspaceStore) -> (String, String) {
+    activate_context_with_purpose(store, "Answer the test request")
+}
+
+fn activate_context_with_purpose(store: &WorkspaceStore, purpose: &str) -> (String, String) {
     let source_snapshot_id = store
         .record_context_source_snapshot(
             "project-a",
@@ -189,7 +233,7 @@ fn activate_context(store: &WorkspaceStore) -> (String, String) {
             &json!({"files": [{"path": "README.md", "hash": digest('f')}]}),
         )
         .unwrap();
-    let release = context_release(&source_snapshot_id, "Answer the test request");
+    let release = context_release(&source_snapshot_id, purpose);
     let draft = store
         .create_agent_context_draft(
             "project-a",
@@ -228,6 +272,209 @@ fn activate_context(store: &WorkspaceStore) -> (String, String) {
         .bind_finalized_trace_context("project-a", "trace-a", 1, &rule_id, None)
         .unwrap();
     (release_id, rule_id)
+}
+
+fn task_completion_release(
+    context_release_id: &str,
+) -> (EvaluatorReleaseSpecV1, TaskCompletionReleaseConfigV1) {
+    let projector = TaskCompletionProjectorV1 {
+        content_policy: TaskCompletionContentPolicyV1::PreRedactedSummaries,
+        max_tool_observations: 32,
+        max_summary_bytes: 2_048,
+    };
+    let context_projection = ContextProjectionV1 {
+        context_release_id: context_release_id.into(),
+        projection_class: ContextProjectionClassV1::HostedPreRedacted,
+        projector_version: "perseval-context-projector-v1".into(),
+        redaction_version: "perseval-redaction-v1".into(),
+        included_field_ids: BTreeSet::from([
+            "purpose".into(),
+            "supported_task".into(),
+            "success_response".into(),
+        ]),
+    };
+    let evaluator = EvaluatorReleaseSpecV1 {
+        schema_version: EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
+        name: "task completion quality check".into(),
+        task_kind: LearnedTaskKind::TaskCompletion,
+        target_kind: EvaluationTargetKind::TraceRevision,
+        implementation: EvaluationImplementationV1::PromptJudge {
+            provider: "openai".into(),
+            requested_model: "gpt-4.1-mini".into(),
+            system_prompt: "Judge only from declared criteria and observed trace evidence.".into(),
+            rubric: "Return completed, partial, failed, or abstain with cited evidence.".into(),
+            response_schema: task_completion_judgment_response_schema(),
+            decoding_parameters: BTreeMap::new(),
+            parser_version: "task-completion-parser-v1".into(),
+            normalizer_version: "task-completion-normalizer-v1".into(),
+        },
+        projection_release_id: projector.release_id().unwrap(),
+        context_projection_release_id: context_projection.release_id().unwrap(),
+        applicable_taxonomy_node_ids: BTreeSet::new(),
+        input_bounds: EvaluationInputBoundsV1 {
+            max_subjects: 1,
+            max_evidence_items: 64,
+            max_input_bytes: 100_000,
+            max_output_bytes: 10_000,
+        },
+        evidence_schema_version: "traceeval.evidence.v1".into(),
+        abstention_policy: json!({
+            "unresolved_context": "abstain",
+            "truncated_projection": "abstain"
+        }),
+        code_artifact_hash: digest('9'),
+    };
+    let evaluator_release_id = evaluator.release_id().unwrap();
+    let config = TaskCompletionReleaseConfigV1 {
+        schema_version: TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION.into(),
+        project_id: "project-a".into(),
+        evaluator_release_id,
+        context_release_id: context_release_id.into(),
+        context_projection,
+        projector,
+        requested_model: "gpt-4.1-mini".into(),
+        estimated_output_tokens_low: 96,
+        estimated_output_tokens_high: 384,
+        input_cost_micros_per_million_tokens: 400_000,
+        output_cost_micros_per_million_tokens: 1_600_000,
+        pricing_version: "openai-2026-07-19".into(),
+        activated_by: "human-reviewer".into(),
+        activated_at_unix_ms: 1,
+    };
+    (evaluator, config)
+}
+
+struct RetryThenSucceedTaskCompletionRunner {
+    calls: AtomicUsize,
+}
+
+impl TaskCompletionEvaluationRunner for RetryThenSucceedTaskCompletionRunner {
+    fn evaluate(
+        &self,
+        evaluator_release: EvaluatorReleaseSpecV1,
+        _config: &TaskCompletionReleaseConfigV1,
+        projection: &TaskCompletionProjectionV1,
+        _binding: &TraceContextBindingV1,
+    ) -> anyhow::Result<TaskCompletionExecutionV1> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(ProviderExecutionFailureV1 {
+                stage: ProviderExecutionStageV1::Transport,
+                message: "temporary provider transport failure".into(),
+                requested_model: "gpt-4.1-mini".into(),
+                request_hash: digest('1'),
+                attempts: 1,
+                latency_ms: 5,
+                provider_response: None,
+            }
+            .into());
+        }
+        let (evidence_key, record) = projection.evidence_catalog.entries.iter().next().unwrap();
+        let criteria = projection
+            .criteria
+            .iter()
+            .map(|criterion| EvaluationCriterionV1 {
+                criterion_id: criterion.criterion_id.clone(),
+                label: "satisfied".into(),
+                score: Some(0.9),
+                passed: true,
+                evidence_keys: vec![evidence_key.clone()],
+            })
+            .collect();
+        let evidence = projection
+            .criteria
+            .iter()
+            .map(|criterion| EvaluationEvidenceCitationV1 {
+                evidence_key: evidence_key.clone(),
+                evidence_kind: record.evidence_kind,
+                location: record.location.clone(),
+                criterion_id: Some(criterion.criterion_id.clone()),
+            })
+            .collect();
+        Ok(TaskCompletionExecutionV1 {
+            evaluation: LearnedEvaluationV1 {
+                schema_version: LEARNED_EVALUATION_SCHEMA_VERSION.into(),
+                evaluator_release_id: evaluator_release.release_id().unwrap(),
+                target_key: projection.target_key.clone(),
+                target_revision: projection.target_revision.clone(),
+                trace_context_binding_id: projection.trace_context_binding_id.clone(),
+                projection_hash: projection.projection_hash.clone(),
+                verdict: LearnedVerdictV1::Pass,
+                label: Some("completed".into()),
+                score: Some(0.9),
+                model_reported_confidence: Some(0.8),
+                explanation: "Observed terminal and tool evidence supports completion.".into(),
+                evidence,
+                criteria,
+                abstention_reason: None,
+            },
+            provider: Some(ProviderResponseEnvelopeV1 {
+                provider: Some("openai".into()),
+                requested_model: "gpt-4.1-mini".into(),
+                returned_model: Some("gpt-4.1-mini-2026-06-01".into()),
+                response_id: Some("response-test".into()),
+                finish_reason: Some("stop".into()),
+                system_fingerprint: Some("fp-test".into()),
+                service_tier: Some("default".into()),
+                usage: Some(ProviderTokenUsageV1 {
+                    input_tokens: Some(1_000),
+                    output_tokens: Some(100),
+                    total_tokens: Some(1_100),
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                request_hash: digest('2'),
+                response_hash: digest('3'),
+                attempts: 1,
+                latency_ms: 25,
+            }),
+        })
+    }
+}
+
+struct OutputParsingFailureTaskCompletionRunner {
+    calls: AtomicUsize,
+}
+
+impl TaskCompletionEvaluationRunner for OutputParsingFailureTaskCompletionRunner {
+    fn evaluate(
+        &self,
+        _evaluator_release: EvaluatorReleaseSpecV1,
+        _config: &TaskCompletionReleaseConfigV1,
+        _projection: &TaskCompletionProjectionV1,
+        _binding: &TraceContextBindingV1,
+    ) -> anyhow::Result<TaskCompletionExecutionV1> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let response = ProviderResponseEnvelopeV1 {
+            provider: Some("openai".into()),
+            requested_model: "gpt-4.1-mini".into(),
+            returned_model: Some("gpt-4.1-mini-2026-06-01".into()),
+            response_id: Some("response-invalid".into()),
+            finish_reason: Some("stop".into()),
+            system_fingerprint: Some("fp-test".into()),
+            service_tier: Some("default".into()),
+            usage: Some(ProviderTokenUsageV1 {
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                total_tokens: Some(110),
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            }),
+            request_hash: digest('4'),
+            response_hash: digest('5'),
+            attempts: 1,
+            latency_ms: 12,
+        };
+        Err(ProviderExecutionFailureV1 {
+            stage: ProviderExecutionStageV1::OutputParsing,
+            message: "provider output did not match the judgment schema".into(),
+            requested_model: response.requested_model.clone(),
+            request_hash: response.request_hash.clone(),
+            attempts: response.attempts,
+            latency_ms: response.latency_ms,
+            provider_response: Some(response),
+        }
+        .into())
+    }
 }
 
 #[test]
@@ -291,6 +538,16 @@ fn migration_18_and_zero_finding_assessment_round_trip() {
             .unwrap(),
         1
     );
+    assert_eq!(
+        control
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 19",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
     for table in [
         "agent_context_releases",
         "taxonomy_releases",
@@ -299,6 +556,8 @@ fn migration_18_and_zero_finding_assessment_round_trip() {
         "assessment_attempts",
         "assessments",
         "assessment_cache_entries",
+        "task_completion_release_configs",
+        "assessment_sampling_policies",
     ] {
         assert!(
             control
@@ -367,6 +626,462 @@ fn migration_18_and_zero_finding_assessment_round_trip() {
     assert_eq!(export.items[0].logical_trace_id, "trace-a");
     assert_eq!(export.items[0].revision, 1);
     assert!(export.items[0].assessment.is_some());
+}
+
+#[test]
+fn task_completion_preview_commit_and_projection_are_exact_and_stale_safe() {
+    let (directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_eq!(evaluator_release_id, config.evaluator_release_id);
+
+    let exact_revisions = vec![("trace-a".into(), 1)];
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    assert_eq!(preview.target_count, 1);
+    assert_eq!(preview.executable_count, 1);
+    assert_eq!(preview.non_executable_count, 0);
+    assert_eq!(
+        preview.content_policy,
+        TaskCompletionContentPolicyV1::PreRedactedSummaries
+    );
+    assert!(preview.estimated_input_tokens_low > 0);
+    assert!(preview.estimated_input_tokens_high >= preview.estimated_input_tokens_low);
+    assert!(preview.estimated_cost_micros_low > 0);
+    assert!(preview.estimated_cost_micros_high >= preview.estimated_cost_micros_low);
+    assert_eq!(
+        preview.targets[0].context_release_id.as_deref(),
+        Some(context_release_id.as_str())
+    );
+    assert!(preview.targets[0].non_executable_reason.is_none());
+
+    let release_identity_before_sampling = evaluator.release_id().unwrap();
+    store
+        .set_assessment_sampling_policy(
+            &AssessmentSamplingPolicyV1 {
+                schema_version: ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                evaluator_release_id: evaluator_release_id.clone(),
+                enabled: true,
+                sample_basis_points: 2_500,
+                maximum_targets_per_utc_day: 100,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 2,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_eq!(
+        evaluator.release_id().unwrap(),
+        release_identity_before_sampling
+    );
+    assert_eq!(
+        store
+            .assessment_sampling_policy("project-a", &evaluator_release_id)
+            .unwrap()
+            .unwrap()
+            .sample_basis_points,
+        2_500
+    );
+    let quality_checks = store
+        .list_task_completion_quality_checks("project-a")
+        .unwrap();
+    assert_eq!(quality_checks.len(), 1);
+    assert_eq!(
+        quality_checks[0].evaluator.release_id().unwrap(),
+        evaluator_release_id
+    );
+    assert_eq!(
+        quality_checks[0]
+            .sampling_policy
+            .as_ref()
+            .unwrap()
+            .sample_basis_points,
+        2_500
+    );
+
+    let job = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "pv02-exact-run",
+        )
+        .unwrap();
+    assert_eq!(job.selection_hash, preview.selection_hash);
+    assert_eq!(
+        store
+            .assessment_job("project-a", &job.job_id)
+            .unwrap()
+            .unwrap()
+            .job_id,
+        job.job_id
+    );
+    assert_eq!(
+        store
+            .list_assessment_jobs("project-a", Some(&evaluator_release_id), 0, 50)
+            .unwrap(),
+        vec![job.clone()]
+    );
+    let projection = store
+        .load_task_completion_projection("project-a", &preview.targets[0].projection_hash)
+        .unwrap()
+        .unwrap();
+    projection.validate().unwrap();
+    assert_eq!(
+        projection.projection_hash,
+        preview.targets[0].projection_hash
+    );
+    assert_eq!(
+        projection.trace_context_binding_id,
+        preview.targets[0].context_binding_id
+    );
+    assert_eq!(
+        projection.context_release_id.as_deref(),
+        Some(context_release_id.as_str())
+    );
+    assert_eq!(projection.tools.len(), 1);
+    assert_eq!(projection.tools[0].span_id, "span-tool");
+    assert_eq!(
+        projection.tools[0].parent_span_id.as_deref(),
+        Some("span-a")
+    );
+
+    let mut changed_config = config.clone();
+    changed_config.pricing_version = "mutated-pricing".into();
+    let immutable_error = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &changed_config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap_err();
+    assert!(immutable_error.to_string().contains("immutable"));
+    assert_eq!(
+        store
+            .task_completion_release_config("project-a", &evaluator_release_id)
+            .unwrap()
+            .unwrap()
+            .pricing_version,
+        config.pricing_version
+    );
+
+    activate_context_with_purpose(&store, "Answer a changed test request");
+    let replay = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "pv02-exact-run",
+        )
+        .unwrap();
+    assert_eq!(replay.job_id, job.job_id);
+    let stale_error = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "pv02-stale-run",
+        )
+        .unwrap_err();
+    assert!(stale_error.to_string().contains("preview is stale"));
+
+    store
+        .create_project(&CreateProjectV1 {
+            project_id: "project-b".into(),
+            display_name: "Project B".into(),
+            artifact_namespace: "project-b".into(),
+        })
+        .unwrap();
+    assert!(
+        store
+            .preview_assessment_backfill("project-b", &evaluator_release_id, &exact_revisions,)
+            .is_err()
+    );
+    assert!(
+        store
+            .assessment_job("project-b", &job.job_id)
+            .unwrap()
+            .is_none()
+    );
+    let control =
+        rusqlite::Connection::open(WorkspaceStoreLayout::new(directory.path()).control_database())
+            .unwrap();
+    assert_eq!(
+        control
+            .query_row(
+                "SELECT COUNT(*) FROM assessment_jobs WHERE project_id = 'project-a'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn task_completion_executor_retries_transport_and_accounts_provider_usage() {
+    let (_directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    store
+        .set_project_assessment_policy(
+            &ProjectAssessmentPolicyV1 {
+                schema_version: PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                provider_enabled: true,
+                daily_budget_micros: 1_000_000,
+                per_attempt_budget_micros: 1_000_000,
+                lease_duration_ms: 5_000,
+                maximum_attempts: 3,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 1,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let exact_revisions = vec![("trace-a".into(), 1)];
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    let job = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "provider-retry-run",
+        )
+        .unwrap();
+    let runner = Arc::new(RetryThenSucceedTaskCompletionRunner {
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(store);
+    let executor = TaskCompletionAssessmentExecutor::with_runner(store.clone(), runner.clone());
+
+    let first = store
+        .claim_next_assessment("worker-provider", 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.reserved_cost_micros,
+        preview.targets[0].estimated_cost_micros_high
+    );
+    let first_commit = executor.execute(&first);
+    assert_eq!(
+        first_commit.status,
+        AssessmentItemStatusV1::ProviderUnavailable
+    );
+    assert!(first_commit.retryable);
+    assert_eq!(
+        first_commit.error_code.as_deref(),
+        Some("provider_transport_failure")
+    );
+    assert!(
+        store
+            .commit_assessment_attempt(&first, &first_commit)
+            .unwrap()
+            .is_none()
+    );
+
+    thread::sleep(Duration::from_millis(550));
+    let second = store
+        .claim_next_assessment("worker-provider", 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.attempt_number, 2);
+    let second_commit = executor.execute(&second);
+    assert_eq!(second_commit.status, AssessmentItemStatusV1::Succeeded);
+    assert_eq!(second_commit.charged_cost_micros, 560);
+    assert_eq!(second_commit.latency_ms, 25);
+    let record = store
+        .commit_assessment_attempt(&second, &second_commit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, AssessmentItemStatusV1::Succeeded);
+    assert_eq!(record.cost_micros, 560);
+    assert_eq!(record.provider.as_deref(), Some("openai"));
+    assert_eq!(
+        record.returned_model.as_deref(),
+        Some("gpt-4.1-mini-2026-06-01")
+    );
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+    let export = store.export_assessment_job(&job.job_id).unwrap();
+    assert_eq!(export.status_counts.get("succeeded"), Some(&1));
+    assert_eq!(export.total_cost_micros, 560);
+}
+
+#[test]
+fn task_completion_executor_preserves_invalid_provider_output_and_cost() {
+    let (_directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    store
+        .set_project_assessment_policy(
+            &ProjectAssessmentPolicyV1 {
+                schema_version: PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                provider_enabled: true,
+                daily_budget_micros: 1_000_000,
+                per_attempt_budget_micros: 1_000_000,
+                lease_duration_ms: 5_000,
+                maximum_attempts: 3,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 1,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let exact_revisions = vec![("trace-a".into(), 1)];
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    let job = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "provider-invalid-output-run",
+        )
+        .unwrap();
+    let runner = Arc::new(OutputParsingFailureTaskCompletionRunner {
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(store);
+    let executor = TaskCompletionAssessmentExecutor::with_runner(store.clone(), runner.clone());
+    let claim = store
+        .claim_next_assessment("worker-invalid-output", 0)
+        .unwrap()
+        .unwrap();
+    let commit = executor.execute(&claim);
+    assert_eq!(commit.status, AssessmentItemStatusV1::Abstained);
+    assert!(!commit.retryable);
+    assert_eq!(
+        commit.error_code.as_deref(),
+        Some("invalid_provider_output")
+    );
+    assert_eq!(commit.charged_cost_micros, 56);
+    assert!(commit.provider_response.is_some());
+    assert!(commit.provider_failure.is_some());
+    assert_eq!(
+        commit
+            .evaluation
+            .as_ref()
+            .and_then(|evaluation| evaluation.abstention_reason),
+        Some(traces_to_evals::LearnedAbstentionReasonV1::InvalidProviderOutput)
+    );
+    let record = store
+        .commit_assessment_attempt(&claim, &commit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.cost_micros, 56);
+    assert_eq!(record.status, AssessmentItemStatusV1::Abstained);
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+    let export = store.export_assessment_job(&job.job_id).unwrap();
+    assert_eq!(export.status_counts.get("abstained"), Some(&1));
+    assert_eq!(export.total_cost_micros, 56);
+}
+
+#[test]
+fn provider_policy_blocks_task_completion_before_runner_execution() {
+    let (_directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    store
+        .set_project_assessment_policy(
+            &ProjectAssessmentPolicyV1 {
+                schema_version: PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                provider_enabled: false,
+                daily_budget_micros: 0,
+                per_attempt_budget_micros: 0,
+                lease_duration_ms: 5_000,
+                maximum_attempts: 1,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 1,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let exact_revisions = vec![("trace-a".into(), 1)];
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "provider-disabled-run",
+        )
+        .unwrap();
+    let runner = Arc::new(RetryThenSucceedTaskCompletionRunner {
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(store);
+    let executor = TaskCompletionAssessmentExecutor::with_runner(store.clone(), runner.clone());
+    let claim = store
+        .claim_next_assessment("worker-provider-disabled", 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.preflight_status,
+        Some(AssessmentItemStatusV1::ProviderUnavailable)
+    );
+    assert_eq!(claim.reserved_cost_micros, 0);
+    let commit = executor.execute(&claim);
+    assert_eq!(commit.status, AssessmentItemStatusV1::ProviderUnavailable);
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+    let record = store
+        .commit_assessment_attempt(&claim, &commit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, AssessmentItemStatusV1::ProviderUnavailable);
+    assert_eq!(record.cost_micros, 0);
 }
 
 #[test]
@@ -691,6 +1406,70 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
     assert_eq!(
         taxonomy.latest_release_id.as_deref(),
         Some(taxonomy_release_id.as_str())
+    );
+
+    let quality_check = TaskCompletionQualityCheckDraftV1 {
+        name: "Checkout task completion".into(),
+        review_criteria: "Return completed, partial, failed, or abstain. Cite every criterion decision to exact observed trace evidence.".into(),
+        requested_model: "gpt-4.1-mini".into(),
+        context_release_id: release_id,
+        applicable_taxonomy_node_ids: taxonomy
+            .active_nodes
+            .iter()
+            .take(1)
+            .map(|node| node.node_id.clone())
+            .collect(),
+        content_policy: TaskCompletionContentPolicyV1::PreRedactedSummaries,
+        estimated_output_tokens_low: 96,
+        estimated_output_tokens_high: 384,
+        input_cost_micros_per_million_tokens: 400_000,
+        output_cost_micros_per_million_tokens: 1_600_000,
+        pricing_version: "test-pricing-v1".into(),
+    };
+    let mut stale_taxonomy_quality_check = quality_check.clone();
+    stale_taxonomy_quality_check.applicable_taxonomy_node_ids = BTreeSet::from([digest('f')]);
+    assert!(
+        service
+            .publish_task_completion_quality_check(
+                "checkout",
+                &stale_taxonomy_quality_check,
+                "qa-reviewer",
+                ReviewAuthorityV1::Human,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("taxonomy node")
+    );
+    assert!(
+        service
+            .publish_task_completion_quality_check(
+                "checkout",
+                &quality_check,
+                "codex",
+                ReviewAuthorityV1::McpAgent,
+            )
+            .is_err(),
+        "an MCP agent can prepare but must not publish a quality check"
+    );
+    let evaluator_release_id = service
+        .publish_task_completion_quality_check(
+            "checkout",
+            &quality_check,
+            "qa-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let quality_checks = service
+        .list_task_completion_quality_checks("checkout")
+        .unwrap();
+    assert_eq!(quality_checks.len(), 1);
+    assert_eq!(
+        quality_checks[0].evaluator.release_id().unwrap(),
+        evaluator_release_id
+    );
+    assert_eq!(
+        quality_checks[0].config.context_release_id,
+        quality_check.context_release_id
     );
 
     let plain_repository = directory.path().join("plain-repository");

@@ -773,6 +773,7 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
             context_binding_id TEXT NOT NULL,
             context_release_id TEXT,
             projection_hash TEXT NOT NULL,
+            estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
             cache_key TEXT NOT NULL,
             status TEXT NOT NULL,
             attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -860,7 +861,32 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
             updated_at_unix_ms INTEGER NOT NULL,
             PRIMARY KEY(project_id, utc_day)
          );
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (18);",
+         CREATE TABLE IF NOT EXISTS task_completion_release_configs(
+            evaluator_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            context_release_id TEXT NOT NULL,
+            context_projection_release_id TEXT NOT NULL,
+            projection_release_id TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            activated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_task_completion_configs_project
+            ON task_completion_release_configs(project_id, activated_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS assessment_sampling_policies(
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY(project_id, evaluator_release_id)
+         );
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (18);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (19);",
+    )?;
+    ensure_control_column(
+        connection,
+        "assessment_job_items",
+        "estimated_cost_micros",
+        "INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(())
 }

@@ -14,7 +14,7 @@ impl WorkbenchShell {
             ActivityId::Failures => EditorResource::FailureInbox,
             ActivityId::Runs => EditorResource::Runs,
             ActivityId::Compare => EditorResource::CompareSetup,
-            ActivityId::Evals => EditorResource::EvalQueue,
+            ActivityId::Evals => EditorResource::EvaluatorStudio,
             ActivityId::Sources => EditorResource::Sources,
             ActivityId::Settings => EditorResource::Settings,
         };

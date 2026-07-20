@@ -1,18 +1,38 @@
+use super::context::validate_project_scope;
 use super::*;
 
 use crate::model::{
-    ASSESSMENT_JOB_EXPORT_SCHEMA_VERSION, ASSESSMENT_JOB_SCHEMA_VERSION,
-    ASSESSMENT_RECORD_SCHEMA_VERSION, AssessmentCommitV1, AssessmentItemStatusV1,
-    AssessmentJobExportV1, AssessmentJobItemExportV1, AssessmentJobStatusV1, AssessmentJobV1,
-    AssessmentRecordV1, AssessmentRuntimeHealthV1, ClaimedAssessmentItemV1, ContextBindingStatusV1,
-    PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1, ReviewAuthorityV1,
+    ASSESSMENT_BACKFILL_PREVIEW_SCHEMA_VERSION, ASSESSMENT_JOB_EXPORT_SCHEMA_VERSION,
+    ASSESSMENT_JOB_SCHEMA_VERSION, ASSESSMENT_RECORD_SCHEMA_VERSION, AssessmentBackfillPreviewV1,
+    AssessmentCommitV1, AssessmentItemStatusV1, AssessmentJobExportV1, AssessmentJobItemExportV1,
+    AssessmentJobStatusV1, AssessmentJobV1, AssessmentPreviewTargetV1, AssessmentRecordV1,
+    AssessmentRuntimeHealthV1, AssessmentSamplingPolicyV1, ClaimedAssessmentItemV1,
+    ContextBindingStatusV1, PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1,
+    ReviewAuthorityV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionQualityCheckV1,
+    TaskCompletionReleaseConfigV1,
 };
 use rusqlite::TransactionBehavior;
 use traces_to_evals::{
-    EVALUATOR_RELEASE_SCHEMA_VERSION, EvaluatorReleaseSpecV1, LearnedAbstentionReasonV1,
-    LearnedVerdictV1, TRACE_CONTEXT_BINDING_SCHEMA_VERSION, TraceContextBindingProvenanceV1,
+    EvaluationImplementationV1, EvaluationTargetKind, EvaluatorReleaseSpecV1,
+    LearnedAbstentionReasonV1, LearnedTaskKind, LearnedVerdictV1,
+    TASK_COMPLETION_PROJECTION_SCHEMA_VERSION, TRACE_CONTEXT_BINDING_SCHEMA_VERSION,
+    TaskCompletionContentPolicyV1, TaskCompletionProjectionV1, TraceContextBindingProvenanceV1,
     TraceContextBindingResolutionV1, TraceContextBindingV1,
+    task_completion_judgment_response_schema,
 };
+
+fn decode_json_column<T: serde::de::DeserializeOwned>(
+    json: &str,
+    column: usize,
+) -> Result<T, rusqlite::Error> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
 
 impl WorkspaceStore {
     pub fn activate_evaluator_release(
@@ -30,54 +50,354 @@ impl WorkspaceStore {
         evaluator
             .validate()
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        let release_id = evaluator
-            .release_id()
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        let definition_id = assessment_identity(
-            "perseval.evaluator-definition.v1",
-            &(project_id, &evaluator.name, &evaluator.task_kind),
-        )?;
         let now = now_unix_ms();
         let mut control = self.control.lock().expect("control store lock poisoned");
         let transaction = control.transaction()?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO evaluator_definitions(
-                evaluator_definition_id, project_id, name, task_kind, created_by,
-                created_at_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                definition_id,
-                project_id,
-                evaluator.name,
-                serde_json::to_string(&evaluator.task_kind)?,
-                activated_by,
-                now,
-            ],
+        let release_id = activate_evaluator_release_in_transaction(
+            &transaction,
+            project_id,
+            evaluator,
+            activated_by,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(release_id)
+    }
+
+    pub fn activate_task_completion_evaluator_release(
+        &self,
+        project_id: &str,
+        evaluator: &EvaluatorReleaseSpecV1,
+        config: &TaskCompletionReleaseConfigV1,
+        activated_by: &str,
+        authority: ReviewAuthorityV1,
+    ) -> Result<String, StoreError> {
+        if authority != ReviewAuthorityV1::Human {
+            return Err(StoreError::Invalid(
+                "only a human reviewer can publish a task-completion quality check".into(),
+            ));
+        }
+        validate_task_completion_release_config(project_id, evaluator, config)?;
+        let context = self
+            .agent_context_release(project_id, &config.context_release_id)?
+            .ok_or_else(|| {
+                StoreError::Invalid(
+                    "task-completion quality check references a missing context release".into(),
+                )
+            })?;
+        config
+            .context_projection
+            .validate_against(&context)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if !evaluator.applicable_taxonomy_node_ids.is_empty() {
+            let control = self.control.lock().expect("control store lock poisoned");
+            let active_release_id = control
+                .query_row(
+                    "SELECT taxonomy_release_id FROM taxonomy_releases
+                     WHERE project_id = ?1
+                     ORDER BY activated_at_unix_ms DESC, rowid DESC LIMIT 1",
+                    params![project_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(active_release_id) = active_release_id else {
+                return Err(StoreError::Invalid(
+                    "quality-check applicability references taxonomy IDs, but the project has no active taxonomy release".into(),
+                ));
+            };
+            for node_id in &evaluator.applicable_taxonomy_node_ids {
+                let exists = control.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM taxonomy_nodes
+                      WHERE taxonomy_release_id = ?1 AND node_id = ?2)",
+                    params![active_release_id, node_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::Invalid(
+                        "quality-check applicability contains a missing, stale, or cross-project taxonomy node".into(),
+                    ));
+                }
+            }
+        }
+
+        let config_json = serde_json::to_string(config)?;
+        let now = now_unix_ms();
+        let mut control = self.control.lock().expect("control store lock poisoned");
+        let transaction = control.transaction()?;
+        if let Some(existing_json) = transaction
+            .query_row(
+                "SELECT config_json FROM task_completion_release_configs
+                 WHERE evaluator_release_id = ?1 AND project_id = ?2",
+                params![config.evaluator_release_id, project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            && existing_json != config_json
+        {
+            return Err(StoreError::Invalid(
+                "task-completion execution configuration is immutable for an evaluator release"
+                    .into(),
+            ));
+        }
+        let release_id = activate_evaluator_release_in_transaction(
+            &transaction,
+            project_id,
+            evaluator,
+            activated_by,
+            now,
         )?;
         transaction.execute(
-            "UPDATE evaluator_releases SET active = 0
-             WHERE evaluator_definition_id = ?1 AND project_id = ?2",
-            params![definition_id, project_id],
-        )?;
-        transaction.execute(
-            "INSERT INTO evaluator_releases(
-                evaluator_release_id, evaluator_definition_id, project_id, release_json,
-                active, activated_by, created_at_unix_ms, activated_at_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?6)
-             ON CONFLICT(evaluator_release_id) DO UPDATE SET
-                active = 1, activated_by = excluded.activated_by,
-                activated_at_unix_ms = excluded.activated_at_unix_ms",
+            "INSERT OR IGNORE INTO task_completion_release_configs(
+                evaluator_release_id, project_id, context_release_id,
+                context_projection_release_id, projection_release_id,
+                config_json, activated_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 release_id,
-                definition_id,
                 project_id,
-                serde_json::to_string(evaluator)?,
-                activated_by,
-                now,
+                config.context_release_id,
+                evaluator.context_projection_release_id,
+                evaluator.projection_release_id,
+                config_json,
+                config.activated_at_unix_ms,
             ],
         )?;
         transaction.commit()?;
         Ok(release_id)
+    }
+
+    pub fn task_completion_release_config(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+    ) -> Result<Option<TaskCompletionReleaseConfigV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT config_json FROM task_completion_release_configs
+                 WHERE project_id = ?1 AND evaluator_release_id = ?2",
+                params![project_id, evaluator_release_id],
+                |row| {
+                    let config_json: String = row.get(0)?;
+                    serde_json::from_str(&config_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            config_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_task_completion_quality_checks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<TaskCompletionQualityCheckV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        let mut statement = control.prepare(
+            "SELECT e.release_json, c.config_json, p.policy_json
+             FROM task_completion_release_configs c
+             JOIN evaluator_releases e
+               ON e.project_id = c.project_id
+              AND e.evaluator_release_id = c.evaluator_release_id
+             LEFT JOIN assessment_sampling_policies p
+               ON p.project_id = c.project_id
+              AND p.evaluator_release_id = c.evaluator_release_id
+             WHERE c.project_id = ?1
+             ORDER BY c.activated_at_unix_ms DESC, c.evaluator_release_id",
+        )?;
+        statement
+            .query_map(params![project_id], |row| {
+                let evaluator_json: String = row.get(0)?;
+                let config_json: String = row.get(1)?;
+                let policy_json: Option<String> = row.get(2)?;
+                Ok(TaskCompletionQualityCheckV1 {
+                    evaluator: decode_json_column(&evaluator_json, 0)?,
+                    config: decode_json_column(&config_json, 1)?,
+                    sampling_policy: policy_json
+                        .as_deref()
+                        .map(|json| decode_json_column(json, 2))
+                        .transpose()?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_assessment_jobs(
+        &self,
+        project_id: &str,
+        evaluator_release_id: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<AssessmentJobV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let limit = limit.clamp(1, 500);
+        let control = self.control.lock().expect("control store lock poisoned");
+        let mut statement = control.prepare(
+            "SELECT job_id FROM assessment_jobs
+             WHERE project_id = ?1
+               AND (?2 IS NULL OR evaluator_release_id = ?2)
+             ORDER BY created_at_unix_ms DESC, job_id
+             LIMIT ?3 OFFSET ?4",
+        )?;
+        let job_ids = statement
+            .query_map(
+                params![
+                    project_id,
+                    evaluator_release_id,
+                    limit as i64,
+                    offset as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        job_ids
+            .into_iter()
+            .map(|job_id| {
+                load_job(&control, &job_id)?.ok_or_else(|| {
+                    StoreError::Invalid("assessment job disappeared while listing".into())
+                })
+            })
+            .collect()
+    }
+
+    pub fn assessment_job(
+        &self,
+        project_id: &str,
+        job_id: &str,
+    ) -> Result<Option<AssessmentJobV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        Ok(load_job(&control, job_id)?.filter(|job| job.project_id == project_id))
+    }
+
+    pub fn evaluator_release(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+    ) -> Result<Option<EvaluatorReleaseSpecV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT release_json FROM evaluator_releases
+                 WHERE project_id = ?1 AND evaluator_release_id = ?2",
+                params![project_id, evaluator_release_id],
+                |row| {
+                    let release_json: String = row.get(0)?;
+                    serde_json::from_str(&release_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            release_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_assessment_sampling_policy(
+        &self,
+        policy: &AssessmentSamplingPolicyV1,
+        authority: ReviewAuthorityV1,
+    ) -> Result<(), StoreError> {
+        if authority != ReviewAuthorityV1::Human {
+            return Err(StoreError::Invalid(
+                "only a human reviewer can change continuous sampling policy".into(),
+            ));
+        }
+        policy.validate().map_err(StoreError::Invalid)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        let release_exists = control.query_row(
+            "SELECT EXISTS(SELECT 1 FROM evaluator_releases
+              WHERE project_id = ?1 AND evaluator_release_id = ?2)",
+            params![policy.project_id, policy.evaluator_release_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !release_exists {
+            return Err(StoreError::Invalid(
+                "sampling policy evaluator release is missing or cross-project".into(),
+            ));
+        }
+        control.execute(
+            "INSERT INTO assessment_sampling_policies(
+                project_id, evaluator_release_id, policy_json, updated_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, evaluator_release_id) DO UPDATE SET
+                policy_json = excluded.policy_json,
+                updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![
+                policy.project_id,
+                policy.evaluator_release_id,
+                serde_json::to_string(policy)?,
+                policy.updated_at_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn assessment_sampling_policy(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+    ) -> Result<Option<AssessmentSamplingPolicyV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT policy_json FROM assessment_sampling_policies
+                 WHERE project_id = ?1 AND evaluator_release_id = ?2",
+                params![project_id, evaluator_release_id],
+                |row| {
+                    let policy_json: String = row.get(0)?;
+                    serde_json::from_str(&policy_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            policy_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn load_task_completion_projection(
+        &self,
+        project_id: &str,
+        projection_hash: &str,
+    ) -> Result<Option<TaskCompletionProjectionV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT p.projection_json
+                 FROM assessment_projections p
+                 JOIN assessment_targets t ON t.target_id = p.target_id
+                 WHERE t.project_id = ?1 AND p.projection_hash = ?2",
+                params![project_id, projection_hash],
+                |row| {
+                    let projection_json: String = row.get(0)?;
+                    serde_json::from_str(&projection_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            projection_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn set_project_assessment_policy(
@@ -139,7 +459,441 @@ impl WorkspaceStore {
             .transpose()
     }
 
+    pub fn preview_assessment_backfill(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+    ) -> Result<AssessmentBackfillPreviewV1, StoreError> {
+        self.prepare_task_completion_backfill(project_id, evaluator_release_id, exact_revisions)
+            .map(|(preview, _)| preview)
+    }
+
+    fn prepare_task_completion_backfill(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+    ) -> Result<(AssessmentBackfillPreviewV1, Vec<PreparedAssessmentTarget>), StoreError> {
+        validate_project_scope(project_id)?;
+        if exact_revisions.is_empty() {
+            return Err(StoreError::Invalid(
+                "assessment selection must contain at least one exact revision".into(),
+            ));
+        }
+        let mut normalized = exact_revisions.to_vec();
+        normalized.sort();
+        normalized.dedup();
+        let evaluator = {
+            let control = self.control.lock().expect("control store lock poisoned");
+            let evaluator_json = control
+                .query_row(
+                    "SELECT release_json FROM evaluator_releases
+                     WHERE evaluator_release_id = ?1 AND project_id = ?2 AND active = 1",
+                    params![evaluator_release_id, project_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    StoreError::Invalid(
+                        "active task-completion evaluator release is missing".into(),
+                    )
+                })?;
+            serde_json::from_str::<EvaluatorReleaseSpecV1>(&evaluator_json)?
+        };
+        let config = self
+            .task_completion_release_config(project_id, evaluator_release_id)?
+            .ok_or_else(|| {
+                StoreError::Invalid(
+                    "active evaluator has no task-completion execution configuration".into(),
+                )
+            })?;
+        validate_task_completion_release_config(project_id, &evaluator, &config)?;
+
+        let mut prepared = Vec::with_capacity(normalized.len());
+        for (logical_trace_id, revision) in &normalized {
+            let (binding_record, binding) =
+                self.ensure_trace_context_binding(project_id, logical_trace_id, *revision)?;
+            let context = match binding.agent_context_release_id.as_deref() {
+                Some(release_id) if release_id == config.context_release_id => self
+                    .agent_context_release(project_id, release_id)?
+                    .ok_or_else(|| {
+                        StoreError::Invalid(
+                            "bound context release disappeared before projection".into(),
+                        )
+                    })?,
+                _ => {
+                    let trace = self.load_analysis_trace(logical_trace_id, *revision)?;
+                    let projection = config
+                        .projector
+                        .project(
+                            logical_trace_id,
+                            &revision.to_string(),
+                            &binding,
+                            None,
+                            None,
+                            &trace,
+                        )
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+                    prepared.push(prepare_preview_target(&config, binding_record, projection)?);
+                    continue;
+                }
+            };
+            let trace = self.load_analysis_trace(logical_trace_id, *revision)?;
+            let projection = config
+                .projector
+                .project(
+                    logical_trace_id,
+                    &revision.to_string(),
+                    &binding,
+                    Some(&context),
+                    Some(&config.context_projection),
+                    &trace,
+                )
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            prepared.push(prepare_preview_target(&config, binding_record, projection)?);
+        }
+        prepared.sort_by(|left, right| {
+            (&left.preview.logical_trace_id, left.preview.revision)
+                .cmp(&(&right.preview.logical_trace_id, right.preview.revision))
+        });
+        let selection_identity = prepared
+            .iter()
+            .map(|target| {
+                (
+                    &target.preview.logical_trace_id,
+                    target.preview.revision,
+                    &target.preview.context_binding_id,
+                    &target.preview.projection_hash,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selection_hash = assessment_identity(
+            "perseval.assessment-selection.v2",
+            &(
+                project_id,
+                evaluator_release_id,
+                &evaluator.projection_release_id,
+                &evaluator.context_projection_release_id,
+                selection_identity,
+            ),
+        )?;
+        let targets = prepared
+            .iter()
+            .map(|target| target.preview.clone())
+            .collect::<Vec<_>>();
+        let executable_count = targets.iter().filter(|target| target.executable).count() as u64;
+        let preview = AssessmentBackfillPreviewV1 {
+            schema_version: ASSESSMENT_BACKFILL_PREVIEW_SCHEMA_VERSION.into(),
+            project_id: project_id.into(),
+            evaluator_release_id: evaluator_release_id.into(),
+            selection_hash,
+            content_policy: config.projector.content_policy,
+            projection_release_id: evaluator.projection_release_id,
+            context_projection_release_id: evaluator.context_projection_release_id,
+            target_count: targets.len() as u64,
+            executable_count,
+            non_executable_count: targets.len() as u64 - executable_count,
+            estimated_input_tokens_low: targets
+                .iter()
+                .map(|target| target.estimated_input_tokens_low)
+                .sum(),
+            estimated_input_tokens_high: targets
+                .iter()
+                .map(|target| target.estimated_input_tokens_high)
+                .sum(),
+            estimated_cost_micros_low: targets
+                .iter()
+                .map(|target| target.estimated_cost_micros_low)
+                .sum(),
+            estimated_cost_micros_high: targets
+                .iter()
+                .map(|target| target.estimated_cost_micros_high)
+                .sum(),
+            targets,
+        };
+        Ok((preview, prepared))
+    }
+
     pub fn enqueue_assessment_job(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+        idempotency_key: &str,
+    ) -> Result<AssessmentJobV1, StoreError> {
+        if self
+            .task_completion_release_config(project_id, evaluator_release_id)?
+            .is_none()
+        {
+            return self.enqueue_foundation_assessment_job(
+                project_id,
+                evaluator_release_id,
+                exact_revisions,
+                idempotency_key,
+            );
+        }
+        let preview =
+            self.preview_assessment_backfill(project_id, evaluator_release_id, exact_revisions)?;
+        self.enqueue_assessment_job_from_preview(
+            project_id,
+            evaluator_release_id,
+            exact_revisions,
+            &preview.selection_hash,
+            idempotency_key,
+        )
+    }
+
+    pub fn enqueue_assessment_job_from_preview(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+        expected_selection_hash: &str,
+        idempotency_key: &str,
+    ) -> Result<AssessmentJobV1, StoreError> {
+        if exact_revisions.is_empty() {
+            return Err(StoreError::Invalid(
+                "assessment selection must contain at least one exact revision".into(),
+            ));
+        }
+        if expected_selection_hash.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "assessment preview selection hash must not be empty".into(),
+            ));
+        }
+        if idempotency_key.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "idempotency key must not be empty".into(),
+            ));
+        }
+
+        // A successful execute replay returns its original result even if the
+        // workspace later changes. A new key must still pass a fresh stale check.
+        {
+            let control = self.control.lock().expect("control store lock poisoned");
+            if let Some(existing) = load_job_by_idempotency(&control, project_id, idempotency_key)?
+            {
+                if existing.selection_hash != expected_selection_hash
+                    || existing.evaluator_release_id != evaluator_release_id
+                {
+                    return Err(StoreError::Invalid(
+                        "idempotency key already belongs to a different assessment selection"
+                            .into(),
+                    ));
+                }
+                return Ok(existing);
+            }
+        }
+
+        // Authorization, exact context binding, and DuckDB projection happen
+        // before the SQLite writer lock. The selection identity covers the full
+        // durable projection, then is checked again at commit.
+        let (preview, prepared) = self.prepare_task_completion_backfill(
+            project_id,
+            evaluator_release_id,
+            exact_revisions,
+        )?;
+        if preview.selection_hash != expected_selection_hash {
+            return Err(StoreError::Invalid(
+                "assessment preview is stale; prepare again".into(),
+            ));
+        }
+        let projection_class = match preview.content_policy {
+            TaskCompletionContentPolicyV1::StructuredOnly => "structural_only",
+            TaskCompletionContentPolicyV1::PreRedactedSummaries => "pre_redacted_summaries",
+        };
+
+        let now = now_unix_ms();
+        let mut control = self.control.lock().expect("control store lock poisoned");
+        let transaction = control.transaction()?;
+        if let Some(existing) = load_job_by_idempotency(&transaction, project_id, idempotency_key)?
+        {
+            if existing.selection_hash != expected_selection_hash
+                || existing.evaluator_release_id != evaluator_release_id
+            {
+                return Err(StoreError::Invalid(
+                    "idempotency key already belongs to a different assessment selection".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let evaluator_json: String = transaction
+            .query_row(
+                "SELECT release_json FROM evaluator_releases
+                 WHERE evaluator_release_id = ?1 AND project_id = ?2 AND active = 1",
+                params![evaluator_release_id, project_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::Invalid("active evaluator release is missing".into()))?;
+        let evaluator: EvaluatorReleaseSpecV1 = serde_json::from_str(&evaluator_json)?;
+        evaluator
+            .validate()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        let job_id = assessment_identity(
+            "perseval.assessment-job.v1",
+            &(
+                project_id,
+                evaluator_release_id,
+                expected_selection_hash,
+                idempotency_key,
+            ),
+        )?;
+        transaction.execute(
+            "INSERT INTO assessment_jobs(
+                job_id, project_id, evaluator_release_id, idempotency_key, selection_hash,
+                status, item_count, terminal_count, created_at_unix_ms, updated_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, 0, ?7, ?7)",
+            params![
+                job_id,
+                project_id,
+                evaluator_release_id,
+                idempotency_key,
+                expected_selection_hash,
+                prepared.len() as i64,
+                now,
+            ],
+        )?;
+        for prepared_target in prepared {
+            let target_preview = prepared_target.preview;
+            let projection = prepared_target.projection;
+            let logical_trace_id = target_preview.logical_trace_id;
+            let revision = target_preview.revision;
+            if projection.projection_hash != target_preview.projection_hash
+                || projection.trace_context_binding_id != target_preview.context_binding_id
+            {
+                return Err(StoreError::Invalid(
+                    "prepared assessment projection identity changed before commit".into(),
+                ));
+            }
+            let (trace_project_id, lifecycle, finalized_at): (String, String, Option<i64>) =
+                transaction
+                    .query_row(
+                        "SELECT t.project_id, r.lifecycle, r.finalized_at_unix_ms
+                         FROM logical_traces t JOIN trace_revisions r
+                           ON r.logical_trace_id = t.logical_trace_id AND r.revision = ?3
+                         WHERE t.workspace_id = ?1 AND t.logical_trace_id = ?2",
+                        params![self.workspace_id, logical_trace_id, revision as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        StoreError::Invalid("selected exact revision is missing".into())
+                    })?;
+            if trace_project_id != project_id || lifecycle != "finalized" {
+                return Err(StoreError::Invalid(
+                    "assessment selection contains a cross-project or non-finalized revision"
+                        .into(),
+                ));
+            }
+            let target_id = assessment_identity(
+                "perseval.assessment-target.v1",
+                &(project_id, &logical_trace_id, revision, "trace_revision"),
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO assessment_targets(
+                    target_id, project_id, logical_trace_id, revision, target_kind,
+                    target_key, target_revision, finalized_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, 'trace_revision', ?3, ?5, ?6)",
+                params![
+                    target_id,
+                    project_id,
+                    logical_trace_id,
+                    revision as i64,
+                    revision.to_string(),
+                    finalized_at.unwrap_or(now),
+                ],
+            )?;
+            let binding = latest_or_unresolved_binding(
+                &transaction,
+                project_id,
+                &logical_trace_id,
+                revision,
+                now,
+            )?;
+            if binding.binding_id != target_preview.context_binding_id
+                || binding.context_release_id != target_preview.context_release_id
+            {
+                return Err(StoreError::Invalid(
+                    "assessment preview is stale; prepare again".into(),
+                ));
+            }
+            let cache_key = assessment_identity(
+                "perseval.assessment-cache.v1",
+                &(
+                    evaluator_release_id,
+                    &binding.binding_id,
+                    &target_preview.projection_hash,
+                    evaluator_provider_model_identity(&evaluator),
+                ),
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO assessment_projections(
+                    projection_hash, target_id, projection_release_id,
+                    context_projection_release_id, projection_class, projection_json,
+                    created_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    target_preview.projection_hash,
+                    target_id,
+                    evaluator.projection_release_id,
+                    evaluator.context_projection_release_id,
+                    projection_class,
+                    serde_json::to_string(&projection)?,
+                    now,
+                ],
+            )?;
+            let item_id = assessment_identity(
+                "perseval.assessment-item.v1",
+                &(&job_id, &target_id, evaluator_release_id),
+            )?;
+            transaction.execute(
+                "INSERT INTO assessment_job_items(
+                    item_id, job_id, project_id, target_id, logical_trace_id, revision,
+                    evaluator_release_id, context_binding_id, context_release_id,
+                    projection_hash, estimated_cost_micros, cache_key, status,
+                    created_at_unix_ms, updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                           'pending', ?13, ?13)",
+                params![
+                    item_id,
+                    job_id,
+                    project_id,
+                    target_id,
+                    logical_trace_id,
+                    revision as i64,
+                    evaluator_release_id,
+                    binding.binding_id,
+                    binding.context_release_id,
+                    target_preview.projection_hash,
+                    target_preview.estimated_cost_micros_high,
+                    cache_key,
+                    now,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(AssessmentJobV1 {
+            schema_version: ASSESSMENT_JOB_SCHEMA_VERSION.into(),
+            job_id,
+            project_id: project_id.into(),
+            evaluator_release_id: evaluator_release_id.into(),
+            idempotency_key: idempotency_key.into(),
+            selection_hash: expected_selection_hash.into(),
+            status: AssessmentJobStatusV1::Pending,
+            item_count: preview.target_count,
+            terminal_count: 0,
+            cancelled_at_unix_ms: None,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        })
+    }
+
+    /// Compatibility path for the PV-01 local/non-prompt executor contracts.
+    /// Prompt judges must use the PV-02 task-completion configuration and exact
+    /// projector path above; they may never execute a placeholder projection.
+    fn enqueue_foundation_assessment_job(
         &self,
         project_id: &str,
         evaluator_release_id: &str,
@@ -164,9 +918,7 @@ impl WorkspaceStore {
             &(project_id, evaluator_release_id, &normalized),
         )?;
 
-        // Authorize every exact target before loading any analytical projection.
-        // This prevents cross-project selections from becoming an implicit read path.
-        {
+        let evaluator = {
             let control = self.control.lock().expect("control store lock poisoned");
             for (logical_trace_id, revision) in &normalized {
                 let allowed = control.query_row(
@@ -191,10 +943,31 @@ impl WorkspaceStore {
                     ));
                 }
             }
+            let evaluator_json = control
+                .query_row(
+                    "SELECT release_json FROM evaluator_releases
+                     WHERE evaluator_release_id = ?1 AND project_id = ?2 AND active = 1",
+                    params![evaluator_release_id, project_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::Invalid("active evaluator release is missing".into()))?;
+            serde_json::from_str::<EvaluatorReleaseSpecV1>(&evaluator_json)?
+        };
+        evaluator
+            .validate()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if matches!(
+            &evaluator.implementation,
+            EvaluationImplementationV1::PromptJudge { .. }
+        ) {
+            return Err(StoreError::Invalid(
+                "prompt-judge execution requires a published task-completion configuration".into(),
+            ));
         }
 
-        // Projection creation can scan DuckDB. Do it before taking the SQLite
-        // writer lock so provider/projection work never blocks control-plane writes.
+        // The compatibility executor consumes only the PV-01 structural input.
+        // Keep its scan outside the SQLite writer lock.
         let mut projected = Vec::with_capacity(normalized.len());
         for (logical_trace_id, revision) in &normalized {
             let input = self.load_behavior_input(logical_trace_id, *revision)?;
@@ -217,18 +990,16 @@ impl WorkspaceStore {
             }
             return Ok(existing);
         }
-        let evaluator_json: String = transaction
-            .query_row(
-                "SELECT release_json FROM evaluator_releases
-                 WHERE evaluator_release_id = ?1 AND project_id = ?2 AND active = 1",
-                params![evaluator_release_id, project_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::Invalid("active evaluator release is missing".into()))?;
-        let evaluator: EvaluatorReleaseSpecV1 = serde_json::from_str(&evaluator_json)?;
-        if evaluator.schema_version != EVALUATOR_RELEASE_SCHEMA_VERSION {
-            return Err(StoreError::Invalid("unsupported evaluator release".into()));
+        let still_active = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM evaluator_releases
+             WHERE evaluator_release_id = ?1 AND project_id = ?2 AND active = 1)",
+            params![evaluator_release_id, project_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !still_active {
+            return Err(StoreError::Invalid(
+                "active evaluator release changed before assessment commit".into(),
+            ));
         }
         let job_id = assessment_identity(
             "perseval.assessment-job.v1",
@@ -389,7 +1160,7 @@ impl WorkspaceStore {
                 "SELECT i.item_id, i.job_id, i.project_id, i.logical_trace_id, i.revision,
                         i.evaluator_release_id, i.context_binding_id, i.context_release_id,
                         i.projection_hash, i.cache_key, i.attempt_count,
-                        p.policy_json, j.cancel_requested
+                        i.estimated_cost_micros, p.policy_json
                  FROM assessment_job_items i
                  JOIN assessment_jobs j ON j.job_id = i.job_id
                  LEFT JOIN project_assessment_policies p ON p.project_id = i.project_id
@@ -411,7 +1182,8 @@ impl WorkspaceStore {
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
                         row.get::<_, i64>(10)? as u32,
-                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, i64>(11)? as u64,
+                        row.get::<_, Option<String>>(12)?,
                     ))
                 },
             )
@@ -428,6 +1200,7 @@ impl WorkspaceStore {
             projection_hash,
             cache_key,
             attempt_count,
+            item_estimated_cost_micros,
             policy_json,
         )) = candidate
         else {
@@ -487,22 +1260,28 @@ impl WorkspaceStore {
             return Ok(None);
         }
         let mut preflight_status = None;
-        let reserved_cost_micros = if context_release_id.is_none() || estimated_cost_micros == 0 {
-            0
-        } else if !policy.provider_enabled {
-            preflight_status = Some(AssessmentItemStatusV1::ProviderUnavailable);
-            0
+        let effective_estimated_cost_micros = if item_estimated_cost_micros > 0 {
+            item_estimated_cost_micros
         } else {
-            let reserve = estimated_cost_micros.min(policy.per_attempt_budget_micros);
-            if reserve < estimated_cost_micros
-                || !reserve_budget(&transaction, &project_id, &policy, reserve, now)?
-            {
-                preflight_status = Some(AssessmentItemStatusV1::BudgetBlocked);
+            estimated_cost_micros
+        };
+        let reserved_cost_micros =
+            if context_release_id.is_none() || effective_estimated_cost_micros == 0 {
+                0
+            } else if !policy.provider_enabled {
+                preflight_status = Some(AssessmentItemStatusV1::ProviderUnavailable);
                 0
             } else {
-                reserve
-            }
-        };
+                let reserve = effective_estimated_cost_micros.min(policy.per_attempt_budget_micros);
+                if reserve < effective_estimated_cost_micros
+                    || !reserve_budget(&transaction, &project_id, &policy, reserve, now)?
+                {
+                    preflight_status = Some(AssessmentItemStatusV1::BudgetBlocked);
+                    0
+                } else {
+                    reserve
+                }
+            };
         let attempt_number = attempt_count + 1;
         let attempt_id = assessment_identity(
             "perseval.assessment-attempt.v1",
@@ -633,11 +1412,9 @@ impl WorkspaceStore {
             transaction.commit()?;
             return Ok(None);
         }
-        if commit.charged_cost_micros > claim.reserved_cost_micros {
-            return Err(StoreError::Invalid(
-                "provider charge exceeds the reserved attempt budget".into(),
-            ));
-        }
+        // The reservation blocks calls whose predeclared ceiling cannot fit.
+        // If a provider later reports an overage, retain and charge the honest
+        // observed amount rather than losing the terminal result or hiding cost.
         release_budget(
             &transaction,
             &claim.project_id,
@@ -1080,14 +1857,221 @@ impl WorkspaceStore {
 }
 
 #[derive(Debug)]
-struct BindingRef {
-    binding_id: String,
-    context_release_id: Option<String>,
-    #[allow(dead_code)]
-    status: ContextBindingStatusV1,
+struct PreparedAssessmentTarget {
+    preview: AssessmentPreviewTargetV1,
+    projection: TaskCompletionProjectionV1,
 }
 
-fn latest_or_unresolved_binding(
+fn prepare_preview_target(
+    config: &TaskCompletionReleaseConfigV1,
+    binding: crate::model::ContextBindingRecordV1,
+    projection: TaskCompletionProjectionV1,
+) -> Result<PreparedAssessmentTarget, StoreError> {
+    if projection.schema_version != TASK_COMPLETION_PROJECTION_SCHEMA_VERSION {
+        return Err(StoreError::Invalid(
+            "unsupported task-completion projection schema version".into(),
+        ));
+    }
+    projection
+        .validate()
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    let projection_bytes = serde_json::to_vec(&projection)?.len() as u64;
+    let input_tokens_low = projection_bytes.saturating_add(4) / 5;
+    let input_tokens_high = projection_bytes.saturating_add(2) / 3;
+    let executable = projection.missing_required_context.is_empty()
+        && !projection.truncated
+        && !projection.evidence_catalog.entries.is_empty();
+    let non_executable_reason = if !projection.missing_required_context.is_empty() {
+        Some(projection.missing_required_context.join(","))
+    } else if projection.truncated {
+        Some("projection_truncated".into())
+    } else if projection.evidence_catalog.entries.is_empty() {
+        Some("evidence_insufficient".into())
+    } else {
+        None
+    };
+    let estimated_cost_micros_low =
+        token_cost_micros(input_tokens_low, config.estimated_output_tokens_low, config);
+    let estimated_cost_micros_high = token_cost_micros(
+        input_tokens_high,
+        config.estimated_output_tokens_high,
+        config,
+    );
+    Ok(PreparedAssessmentTarget {
+        preview: AssessmentPreviewTargetV1 {
+            logical_trace_id: binding.logical_trace_id,
+            revision: binding.revision,
+            context_binding_id: binding.binding_id,
+            context_release_id: binding.context_release_id,
+            projection_hash: projection.projection_hash.clone(),
+            projection_bytes,
+            estimated_input_tokens_low: input_tokens_low,
+            estimated_input_tokens_high: input_tokens_high,
+            estimated_cost_micros_low,
+            estimated_cost_micros_high,
+            executable,
+            non_executable_reason,
+        },
+        projection,
+    })
+}
+
+fn token_cost_micros(
+    input_tokens: u64,
+    output_tokens: u64,
+    config: &TaskCompletionReleaseConfigV1,
+) -> u64 {
+    input_tokens
+        .saturating_mul(config.input_cost_micros_per_million_tokens)
+        .saturating_add(output_tokens.saturating_mul(config.output_cost_micros_per_million_tokens))
+        .saturating_add(999_999)
+        / 1_000_000
+}
+
+fn activate_evaluator_release_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    evaluator: &EvaluatorReleaseSpecV1,
+    activated_by: &str,
+    now: i64,
+) -> Result<String, StoreError> {
+    let release_id = evaluator
+        .release_id()
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    let definition_id = assessment_identity(
+        "perseval.evaluator-definition.v1",
+        &(project_id, &evaluator.name, &evaluator.task_kind),
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO evaluator_definitions(
+            evaluator_definition_id, project_id, name, task_kind, created_by,
+            created_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            definition_id,
+            project_id,
+            evaluator.name,
+            serde_json::to_string(&evaluator.task_kind)?,
+            activated_by,
+            now,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE evaluator_releases SET active = 0
+         WHERE evaluator_definition_id = ?1 AND project_id = ?2",
+        params![definition_id, project_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO evaluator_releases(
+            evaluator_release_id, evaluator_definition_id, project_id, release_json,
+            active, activated_by, created_at_unix_ms, activated_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?6)
+         ON CONFLICT(evaluator_release_id) DO UPDATE SET
+            active = 1, activated_by = excluded.activated_by,
+            activated_at_unix_ms = excluded.activated_at_unix_ms",
+        params![
+            release_id,
+            definition_id,
+            project_id,
+            serde_json::to_string(evaluator)?,
+            activated_by,
+            now,
+        ],
+    )?;
+    Ok(release_id)
+}
+
+fn validate_task_completion_release_config(
+    project_id: &str,
+    evaluator: &EvaluatorReleaseSpecV1,
+    config: &TaskCompletionReleaseConfigV1,
+) -> Result<(), StoreError> {
+    evaluator
+        .validate()
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    let evaluator_release_id = evaluator
+        .release_id()
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    if config.schema_version != TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION
+        || config.project_id != project_id
+        || config.evaluator_release_id != evaluator_release_id
+    {
+        return Err(StoreError::Invalid(
+            "task-completion release configuration identity is inconsistent".into(),
+        ));
+    }
+    if evaluator.task_kind != LearnedTaskKind::TaskCompletion
+        || evaluator.target_kind != EvaluationTargetKind::TraceRevision
+    {
+        return Err(StoreError::Invalid(
+            "task-completion configuration requires a trace-revision task-completion evaluator"
+                .into(),
+        ));
+    }
+    let requested_model = match &evaluator.implementation {
+        EvaluationImplementationV1::PromptJudge {
+            provider,
+            requested_model,
+            response_schema,
+            decoding_parameters,
+            ..
+        } => {
+            if provider != "openai"
+                || !decoding_parameters.is_empty()
+                || response_schema != &task_completion_judgment_response_schema()
+            {
+                return Err(StoreError::Invalid(
+                    "the first task-completion runtime requires OpenAI, the canonical judgment schema, and no unsupported decoding parameters"
+                        .into(),
+                ));
+            }
+            requested_model
+        }
+        _ => {
+            return Err(StoreError::Invalid(
+                "the first task-completion vertical slice requires a prompt judge".into(),
+            ));
+        }
+    };
+    if requested_model != &config.requested_model
+        || evaluator.projection_release_id
+            != config
+                .projector
+                .release_id()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?
+        || evaluator.context_projection_release_id
+            != config
+                .context_projection
+                .release_id()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?
+        || config.context_projection.context_release_id != config.context_release_id
+    {
+        return Err(StoreError::Invalid(
+            "task-completion model or projection identity does not match the evaluator release"
+                .into(),
+        ));
+    }
+    if config.estimated_output_tokens_low == 0
+        || config.estimated_output_tokens_high < config.estimated_output_tokens_low
+        || config.pricing_version.trim().is_empty()
+        || config.activated_by.trim().is_empty()
+    {
+        return Err(StoreError::Invalid(
+            "task-completion output bounds, pricing version, and activation actor are required"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(super) struct BindingRef {
+    pub(super) binding_id: String,
+    pub(super) context_release_id: Option<String>,
+    pub(super) status: ContextBindingStatusV1,
+}
+
+pub(super) fn latest_or_unresolved_binding(
     transaction: &rusqlite::Transaction<'_>,
     project_id: &str,
     logical_trace_id: &str,
@@ -1435,11 +2419,11 @@ fn refresh_job_counts(
 }
 
 fn load_job_by_idempotency(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &rusqlite::Connection,
     project_id: &str,
     key: &str,
 ) -> Result<Option<AssessmentJobV1>, StoreError> {
-    let job_id = transaction
+    let job_id = connection
         .query_row(
             "SELECT job_id FROM assessment_jobs WHERE project_id = ?1 AND idempotency_key = ?2",
             params![project_id, key],
@@ -1447,16 +2431,16 @@ fn load_job_by_idempotency(
         )
         .optional()?;
     job_id
-        .map(|job_id| load_job(transaction, &job_id))
+        .map(|job_id| load_job(connection, &job_id))
         .transpose()
         .map(Option::flatten)
 }
 
 fn load_job(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &rusqlite::Connection,
     job_id: &str,
 ) -> Result<Option<AssessmentJobV1>, StoreError> {
-    transaction
+    connection
         .query_row(
             "SELECT project_id, evaluator_release_id, idempotency_key, selection_hash,
                     status, item_count, terminal_count, cancel_requested,

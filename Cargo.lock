@@ -5176,6 +5176,7 @@ dependencies = [
 name = "perseval-service"
 version = "0.1.2"
 dependencies = [
+ "anyhow",
  "async-channel",
  "async-trait",
  "chrono",
@@ -7648,7 +7649,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "traces-to-evals"
 version = "0.1.0"
-source = "git+https://github.com/Etolith/traces-to-evals?rev=b58792ab1b6d66f1fb9bb9b1d6adf3574e6165ed#b58792ab1b6d66f1fb9bb9b1d6adf3574e6165ed"
+source = "git+https://github.com/Etolith/traces-to-evals?rev=dbeaa5ee1a12b22b3c85f93bbf20b1dc37eebfba#dbeaa5ee1a12b22b3c85f93bbf20b1dc37eebfba"
 dependencies = [
  "anyhow",
  "async-trait",

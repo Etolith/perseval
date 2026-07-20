@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AppContext, Context, Div, EventEmitter, FontWeight, IntoElement, Render, Role, Window, div,
-    prelude::*, px,
+    AppContext, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Window,
+    div, prelude::*, px,
 };
 use perseval_service::{
     EvalCandidateRecordV1, EvalReviewDecisionV1, EvalReviewQueueStateV1, LiveTraceService,
@@ -10,6 +10,16 @@ use perseval_service::{
 
 use crate::components::{button, button_state, tag, telemetry_gap_summary};
 use crate::design::Theme;
+
+mod studio;
+
+use studio::QualityCheckStudio;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalsView {
+    Studio,
+    ReviewQueue,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum EvalReviewEvent {
@@ -36,6 +46,8 @@ pub(crate) struct EvalReviewScreen {
     error: Option<String>,
     notice: Option<String>,
     request_generation: u64,
+    view: EvalsView,
+    studio: Entity<QualityCheckStudio>,
 }
 
 impl EventEmitter<EvalReviewEvent> for EvalReviewScreen {}
@@ -44,8 +56,12 @@ impl EvalReviewScreen {
     pub(crate) fn new(
         service: Arc<LiveTraceService>,
         project_id: Option<String>,
+        reviewer_ref: String,
         cx: &mut Context<Self>,
     ) -> Self {
+        let studio = cx.new(|cx| {
+            QualityCheckStudio::new(service.clone(), project_id.clone(), reviewer_ref, cx)
+        });
         let mut screen = Self {
             service,
             project_id,
@@ -56,6 +72,8 @@ impl EvalReviewScreen {
             error: None,
             notice: None,
             request_generation: 0,
+            view: EvalsView::Studio,
+            studio,
         };
         screen.reload(cx);
         screen
@@ -66,14 +84,25 @@ impl EvalReviewScreen {
             return;
         }
         self.project_id = project_id;
+        let studio_project_id = self.project_id.clone();
+        self.studio.update(cx, |studio, cx| {
+            studio.set_project_scope(studio_project_id, cx)
+        });
         self.selected = None;
         self.notice = None;
         self.reload(cx);
     }
 
     pub(crate) fn show_queue(&mut self, cx: &mut Context<Self>) {
+        self.view = EvalsView::ReviewQueue;
         self.selected = None;
         self.reload(cx);
+    }
+
+    pub(crate) fn show_studio(&mut self, cx: &mut Context<Self>) {
+        self.view = EvalsView::Studio;
+        self.selected = None;
+        cx.notify();
     }
 
     pub(crate) fn show_candidate(
@@ -806,8 +835,11 @@ impl Render for EvalReviewScreen {
             crate::design::Breakpoint::for_window(window) == crate::design::Breakpoint::Compact;
         if let Some(candidate) = &self.selected {
             self.render_candidate(candidate, compact, cx)
+                .into_any_element()
+        } else if self.view == EvalsView::Studio {
+            self.studio.clone().into_any_element()
         } else {
-            self.render_queue(compact, cx)
+            self.render_queue(compact, cx).into_any_element()
         }
     }
 }

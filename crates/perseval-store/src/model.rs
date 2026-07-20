@@ -1036,6 +1036,12 @@ pub const AGENT_CONTEXT_DRAFT_SCHEMA_VERSION: &str = "perseval.agent_context_dra
 pub const ASSESSMENT_JOB_SCHEMA_VERSION: &str = "perseval.assessment_job.v1";
 pub const ASSESSMENT_RECORD_SCHEMA_VERSION: &str = "perseval.assessment_record.v1";
 pub const PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION: &str = "perseval.project_assessment_policy.v1";
+pub const TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION: &str =
+    "perseval.task_completion_release_config.v1";
+pub const ASSESSMENT_BACKFILL_PREVIEW_SCHEMA_VERSION: &str =
+    "perseval.assessment_backfill_preview.v1";
+pub const ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION: &str =
+    "perseval.assessment_sampling_policy.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1181,6 +1187,107 @@ impl ProjectAssessmentPolicyV1 {
         }
         if self.per_attempt_budget_micros > self.daily_budget_micros {
             return Err("per-attempt budget cannot exceed the daily budget".into());
+        }
+        Ok(())
+    }
+}
+
+/// Product-owned execution inputs that are deliberately not inferred from the
+/// portable evaluator release. The evaluator and both projection identities
+/// are still immutable and validated before this configuration is activated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCompletionReleaseConfigV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub context_release_id: String,
+    pub context_projection: traces_to_evals::ContextProjectionV1,
+    pub projector: traces_to_evals::TaskCompletionProjectorV1,
+    pub requested_model: String,
+    pub estimated_output_tokens_low: u64,
+    pub estimated_output_tokens_high: u64,
+    pub input_cost_micros_per_million_tokens: u64,
+    pub output_cost_micros_per_million_tokens: u64,
+    pub pricing_version: String,
+    pub activated_by: String,
+    pub activated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssessmentPreviewTargetV1 {
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub context_binding_id: String,
+    pub context_release_id: Option<String>,
+    pub projection_hash: String,
+    pub projection_bytes: u64,
+    pub estimated_input_tokens_low: u64,
+    pub estimated_input_tokens_high: u64,
+    pub estimated_cost_micros_low: u64,
+    pub estimated_cost_micros_high: u64,
+    pub executable: bool,
+    pub non_executable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssessmentBackfillPreviewV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub selection_hash: String,
+    pub content_policy: traces_to_evals::TaskCompletionContentPolicyV1,
+    pub projection_release_id: String,
+    pub context_projection_release_id: String,
+    pub target_count: u64,
+    pub executable_count: u64,
+    pub non_executable_count: u64,
+    pub estimated_input_tokens_low: u64,
+    pub estimated_input_tokens_high: u64,
+    pub estimated_cost_micros_low: u64,
+    pub estimated_cost_micros_high: u64,
+    pub targets: Vec<AssessmentPreviewTargetV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssessmentSamplingPolicyV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub enabled: bool,
+    /// Deterministic percentage in basis points. This policy changes which
+    /// targets are selected, never the evaluator release identity.
+    pub sample_basis_points: u32,
+    pub maximum_targets_per_utc_day: u64,
+    pub updated_by: String,
+    pub updated_at_unix_ms: i64,
+}
+
+/// Read model for the Evaluator Studio. The immutable evaluator and execution
+/// configuration remain separate from the mutable continuous-sampling policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskCompletionQualityCheckV1 {
+    pub evaluator: traces_to_evals::EvaluatorReleaseSpecV1,
+    pub config: TaskCompletionReleaseConfigV1,
+    pub sampling_policy: Option<AssessmentSamplingPolicyV1>,
+}
+
+impl AssessmentSamplingPolicyV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION {
+            return Err("unsupported assessment sampling policy schema version".into());
+        }
+        if self.project_id.trim().is_empty()
+            || self.evaluator_release_id.trim().is_empty()
+            || self.updated_by.trim().is_empty()
+        {
+            return Err("sampling policy identities and updated_by must not be empty".into());
+        }
+        if self.sample_basis_points > 10_000 {
+            return Err("sample_basis_points cannot exceed 10000".into());
+        }
+        if self.enabled && (self.sample_basis_points == 0 || self.maximum_targets_per_utc_day == 0)
+        {
+            return Err("enabled sampling requires a positive rate and daily target limit".into());
         }
         Ok(())
     }
