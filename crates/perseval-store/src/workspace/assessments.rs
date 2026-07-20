@@ -182,12 +182,17 @@ impl WorkspaceStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            && existing_json != config_json
         {
-            return Err(StoreError::Invalid(
-                "task-completion execution configuration is immutable for an evaluator release"
-                    .into(),
-            ));
+            let existing: TaskCompletionReleaseConfigV1 = serde_json::from_str(&existing_json)?;
+            let mut comparable = config.clone();
+            comparable.activated_by = existing.activated_by.clone();
+            comparable.activated_at_unix_ms = existing.activated_at_unix_ms;
+            if existing != comparable {
+                return Err(StoreError::Invalid(
+                    "task-completion execution configuration is immutable for an evaluator release"
+                        .into(),
+                ));
+            }
         }
         let release_id = activate_evaluator_release_in_transaction(
             &transaction,

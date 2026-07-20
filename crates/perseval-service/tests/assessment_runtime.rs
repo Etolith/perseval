@@ -702,6 +702,23 @@ fn task_completion_preview_commit_and_projection_are_exact_and_stale_safe() {
     );
     assert!(preview.targets[0].non_executable_reason.is_none());
 
+    let mut retried_config = config.clone();
+    retried_config.activated_by = "second-human-reviewer".into();
+    retried_config.activated_at_unix_ms = 2;
+    assert_eq!(
+        store
+            .activate_task_completion_evaluator_release(
+                "project-a",
+                &evaluator,
+                &retried_config,
+                "second-human-reviewer",
+                ReviewAuthorityV1::Human,
+            )
+            .unwrap(),
+        evaluator_release_id,
+        "activation retries must ignore audit-event metadata"
+    );
+
     let release_identity_before_sampling = evaluator.release_id().unwrap();
     store
         .set_assessment_sampling_policy(
@@ -966,6 +983,14 @@ fn task_completion_executor_retries_transport_and_accounts_provider_usage() {
     assert_eq!(
         first_commit.error_code.as_deref(),
         Some("provider_transport_failure")
+    );
+    assert_eq!(
+        first_commit
+            .evidence_catalog
+            .as_ref()
+            .map(|catalog| catalog.projection_hash.as_str()),
+        Some(first.projection_hash.as_str()),
+        "transport failures must preserve the exact projected evidence catalog"
     );
     assert!(
         store
