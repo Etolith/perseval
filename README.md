@@ -83,7 +83,7 @@ explicit human approval.
 ### Learned quality checks
 
 Run a versioned Task Completion review over finalized trace revisions without
-turning model output into a deterministic finding. The native **Evaluate**
+turning model output into a deterministic finding. The native **Evals**
 workspace separates the quality-check definition, bounded backfill preview,
 provider execution, human review, and calibration policy so each artifact keeps
 its own immutable provenance.
@@ -92,8 +92,8 @@ its own immutable provenance.
 calibration seals the automated output and peer answers until the reviewer has
 submitted an answer and evidence. Visible triage reveals the automated output
 for investigation, but its answers are excluded from agreement and calibration.
-Every review remains bound to the exact trace revision and can open its cited
-evidence in the full trace.
+Every review remains bound to the exact trace revision. After opening that
+frozen trace, choose **Reviews** in the inspector to open each cited span.
 
 **Calibration** reports held-out confusion, agreement, Brier score, reliability,
 abstention, risk/coverage, and slices. A threshold policy materializes new

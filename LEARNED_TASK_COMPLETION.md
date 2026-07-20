@@ -19,7 +19,7 @@ changes.
 
 ## Run a quality check
 
-1. Open **Evaluate**, then select **Quality checks**.
+1. Open **Evals**, then select **Quality checks**.
 2. Publish the Task Completion quality check. Its evaluator release, criteria,
    mapping, provider model, projection policy, output schema, and abstention
    behavior become immutable.
@@ -48,8 +48,9 @@ Use **Review Queue** in one of two modes:
 
 The saved annotation is immutable and remains attached to its annotation-schema
 release and exact trace revision. **Open exact trace** navigates to that frozen
-revision; automated evidence citations resolve to the submitted projection's
-span and byte range.
+revision. In the trace inspector, select **Reviews**, then open the automated
+evidence citation; it resolves to the submitted projection's span and byte
+range.
 
 ## Calibrate decisions safely
 
