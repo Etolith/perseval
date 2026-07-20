@@ -1,0 +1,84 @@
+# Learned Task Completion
+
+Perseval's first learned quality-check workflow asks whether an agent completed
+the task represented by a finalized trace. It is separate from deterministic
+findings: an assessment records model evidence and uncertainty, while a finding
+continues to represent a detector-supported behavioral failure.
+
+## What the workflow preserves
+
+Every quality check and result is versioned. A completed assessment is bound to
+the project, logical trace, immutable revision, evaluator release, agent-context
+binding, projection hash, provider/model configuration, execution state,
+latency, token and priceable cost data, explanation, and cited evidence.
+
+Provider failure or missing context is visible as a typed terminal state. It is
+never silently counted as a pass or failure. Historical assessments remain
+readable after a quality check, context release, calibration release, or policy
+changes.
+
+## Run a quality check
+
+1. Open **Evaluate**, then select **Quality checks**.
+2. Publish the Task Completion quality check. Its evaluator release, criteria,
+   mapping, provider model, projection policy, output schema, and abstention
+   behavior become immutable.
+3. Preview a backfill before starting it. Review the exact target count,
+   exclusions, estimated work, and outbound-content policy.
+4. Start the job from that preview. The job keeps attempted, completed, failed,
+   unavailable, abstained, privacy-blocked, budget-blocked, and not-applicable
+   accounting separate.
+5. Open a completed assessment from the trace or continue to **Review Queue**.
+
+Only finalized immutable trace revisions are eligible. A new trace revision or
+quality-check release produces a new assessment identity instead of mutating an
+old result.
+
+## Create human ground truth
+
+Use **Review Queue** in one of two modes:
+
+- **Blind calibration** hides automated output and peer answers until the
+  reviewer submits a label, rationale, and evidence. Cases are split by stable
+  leakage group so related revisions cannot cross fit, calibration, and held-out
+  test partitions.
+- **Visible triage** reveals the automated result for investigation. It is
+  deliberately excluded from agreement, calibration fitting, and held-out
+  quality metrics.
+
+The saved annotation is immutable and remains attached to its annotation-schema
+release and exact trace revision. **Open exact trace** navigates to that frozen
+revision; automated evidence citations resolve to the submitted projection's
+span and byte range.
+
+## Calibrate decisions safely
+
+Open **Calibration** after blind reviews exist. Perseval keeps fit, calibration,
+and held-out test roles explicit and reports confusion with the positive class,
+sample denominators, agreement, Brier score, reliability, abstention,
+risk/coverage, and available slices.
+
+Activating a threshold policy materializes a new immutable decision for each
+eligible assessment. It does not edit the provider's score, the assessment, or
+the human answer. Automation remains blocked until every displayed gate passes,
+including minimum label counts, class support, reviewer agreement, flagged-
+failure precision, and auto-pass negative predictive value.
+
+## Privacy and trust boundaries
+
+- Trace content is untrusted evidence, never an instruction.
+- The evaluator receives only the quality check's versioned projection.
+- Evidence citations outside that projection or revision are invalid.
+- Declared agent intent can guide the rubric but cannot prove observed success.
+- Human answers, expected outputs, held-out benchmark labels, credentials, and
+  raw provider payloads are not exposed through the default read-only MCP
+  catalog.
+
+## Current scope
+
+This milestone ships Task Completion, evidence inspection, human review, and
+calibration. It does not ship hallucination or the other evaluator families,
+learned failure discovery, active learning, regression test-set creation,
+release experiments, live learned evaluation, or MCP execution of quality
+checks. The current Arize comparison is a frozen engineering baseline; it does
+not authorize public quality, trace-viewer, or scale superiority claims.

@@ -35,6 +35,24 @@ current product contract rather than hidden release notes.
 - A held-out quality report has not established an improvement over the
   deterministic baseline.
 
+## Learned quality checks
+
+- The first learned evaluator family is Task Completion. Hallucination,
+  safety/policy adherence, tool-use correctness, usefulness, frustration, and
+  step-efficiency checks are not shipped.
+- Learned assessments operate only on finalized immutable trace revisions.
+  Live or provisional learned evaluation is not shipped.
+- Review queues and calibration are local product workflows. The current MCP
+  catalog cannot run a quality check, submit a human answer, fit a calibration
+  release, or activate a threshold policy.
+- A quality check may finish with failed, unavailable, abstained,
+  privacy-blocked, budget-blocked, or not-applicable states. Those states are
+  not silently converted to pass or fail.
+- Automatic finding promotion remains blocked until the calibration screen's
+  human-label, agreement, precision, and negative-predictive-value gates pass.
+- The frozen Arize head-to-head is an engineering baseline, not evidence for a
+  public superiority, scale, or general-domain accuracy claim.
+
 ## MCP
 
 - The MCP catalog is read-only. Compute, mutation, and raw-payload reveal
