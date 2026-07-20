@@ -120,6 +120,7 @@ pub(crate) struct SettingsScreen {
 }
 
 impl SettingsScreen {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         service: Option<Arc<LiveTraceService>>,
         config: PersevalConfigV1,

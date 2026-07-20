@@ -549,9 +549,11 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
     .unwrap();
     std::fs::write(repository.join("expected-answer-fixture.md"), "gold label").unwrap();
 
-    let mut config = PersevalConfigV1::default();
-    config.workspace_dir = directory.path().join("workspace");
-    config.workspace_id = "repository-draft-test".into();
+    let mut config = PersevalConfigV1 {
+        workspace_dir: directory.path().join("workspace"),
+        workspace_id: "repository-draft-test".into(),
+        ..Default::default()
+    };
     config.otlp.enabled = false;
     let service = LiveTraceService::start(config).unwrap();
     service
