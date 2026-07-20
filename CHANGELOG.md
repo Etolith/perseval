@@ -5,6 +5,16 @@ uses semantic version tags.
 
 ## Unreleased
 
+### Added
+
+- Added versioned Task Completion quality checks over finalized immutable trace
+  revisions, with bounded backfill previews and durable provider-run state.
+- Added evidence-backed human review with server-enforced blind calibration and
+  separately labeled visible triage.
+- Added immutable calibration releases, held-out quality reports, slice metrics,
+  and safety-gated threshold policies that materialize new decisions without
+  rewriting assessments.
+
 ## 0.1.2 - 2026-07-16
 
 ### Added

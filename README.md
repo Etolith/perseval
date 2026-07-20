@@ -80,6 +80,30 @@ explicit human approval.
 
 ![Perseval eval candidate review with evidence provenance](assets/screenshots/eval-review.png)
 
+### Learned quality checks
+
+Run a versioned Task Completion review over finalized trace revisions without
+turning model output into a deterministic finding. The native **Evals**
+workspace separates the quality check definition, bounded backfill preview,
+provider execution, human review, and calibration policy so each artifact keeps
+its own immutable provenance.
+
+**Review Queue** supports two intentionally different workflows. Blind
+calibration seals the automated output and peer answers until the reviewer has
+submitted an answer and evidence. Visible triage reveals the automated output
+for investigation, but its answers are excluded from agreement and calibration.
+Every review remains bound to the exact trace revision. After opening that
+frozen trace, choose **Reviews** in the inspector to open each cited span.
+
+**Calibration** reports held-out confusion, agreement, Brier score, reliability,
+abstention, risk/coverage, and slices. A threshold policy materializes new
+immutable assessment decisions; it never rewrites the underlying assessment.
+Automation stays blocked until all displayed sample, agreement, precision, and
+negative-predictive-value gates pass.
+
+See [Learned Task Completion](LEARNED_TASK_COMPLETION.md) for the shipped
+workflow, safety boundaries, and current limits.
+
 ### Compare
 
 See whether a code, model, or prompt change actually changed agent behavior.
