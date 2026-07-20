@@ -15,6 +15,11 @@ uses semantic version tags.
   and safety-gated threshold policies that materialize new decisions without
   rewriting assessments.
 
+### Changed
+
+- Indexed workspace-wide and project-scoped run ordering so chronological,
+  most-spans, and most-findings pages stay efficient as workspaces grow.
+
 ## 0.1.2 - 2026-07-16
 
 ### Added

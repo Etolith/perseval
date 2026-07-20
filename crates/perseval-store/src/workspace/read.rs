@@ -32,13 +32,18 @@ impl WorkspaceStore {
                 "finding_count DESC, start_time_unix_nano DESC, logical_trace_id"
             }
         };
+        let project_predicate = if scope.project_id.as_deref().unwrap_or_default().is_empty() {
+            "?2 = ''"
+        } else {
+            "project_id = ?2"
+        };
         let query = format!(
             "SELECT project_id, logical_trace_id, external_trace_id, revision, lifecycle, title,
                     service_name, environment, session_id, build_id, agent_id, identity_quality,
                     start_time_unix_nano, end_time_unix_nano, last_committed_unix_ms,
                     span_count, error_count, analysis_status, finding_count
              FROM logical_traces WHERE workspace_id = ?1
-               AND (?2 = '' OR project_id = ?2)
+               AND {project_predicate}
                AND (?3 = '' OR environment = ?3)
                AND (?4 = '' OR build_id = ?4)
                AND (?5 = '' OR session_id = ?5)
@@ -84,9 +89,14 @@ impl WorkspaceStore {
         filters.scope.validate().map_err(StoreError::Invalid)?;
         let scope = &filters.scope.criteria;
         let control = self.control.lock().expect("control store lock poisoned");
-        Ok(control.query_row(
+        let project_predicate = if scope.project_id.as_deref().unwrap_or_default().is_empty() {
+            "?2 = ''"
+        } else {
+            "project_id = ?2"
+        };
+        let query = format!(
             "SELECT COUNT(*) FROM logical_traces WHERE workspace_id = ?1
-               AND (?2 = '' OR project_id = ?2)
+               AND {project_predicate}
                AND (?3 = '' OR environment = ?3)
                AND (?4 = '' OR build_id = ?4)
                AND (?5 = '' OR session_id = ?5)
@@ -94,7 +104,10 @@ impl WorkspaceStore {
                AND (?7 = '' OR lifecycle = ?7)
                AND (?8 = '' OR identity_quality = ?8)
                AND (?9 IS NULL OR start_time_unix_nano >= ?9)
-               AND (?10 IS NULL OR start_time_unix_nano <= ?10)",
+               AND (?10 IS NULL OR start_time_unix_nano <= ?10)"
+        );
+        Ok(control.query_row(
+            &query,
             params![
                 self.workspace_id,
                 scope.project_id.as_deref().unwrap_or(""),

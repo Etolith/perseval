@@ -1148,6 +1148,25 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
         "estimated_cost_micros",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_traces_workspace_started_desc
+            ON logical_traces(workspace_id, start_time_unix_nano DESC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_started_asc
+            ON logical_traces(workspace_id, start_time_unix_nano ASC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_spans
+            ON logical_traces(workspace_id, span_count DESC, start_time_unix_nano DESC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_findings
+            ON logical_traces(workspace_id, finding_count DESC, start_time_unix_nano DESC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_started_desc
+            ON logical_traces(workspace_id, project_id, start_time_unix_nano DESC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_started_asc
+            ON logical_traces(workspace_id, project_id, start_time_unix_nano ASC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_spans
+            ON logical_traces(workspace_id, project_id, span_count DESC, start_time_unix_nano DESC, logical_trace_id ASC);
+         CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_findings
+            ON logical_traces(workspace_id, project_id, finding_count DESC, start_time_unix_nano DESC, logical_trace_id ASC);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (21);",
+    )?;
     Ok(())
 }
 
