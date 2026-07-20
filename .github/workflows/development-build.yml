@@ -1,0 +1,47 @@
+name: Development build
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-build
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Build macOS development artifact
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out Perseval
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Restore Cargo build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+
+      - name: Build and verify the ad-hoc-signed macOS bundle
+        env:
+          PERSEVAL_BUILD_NUMBER: ${{ github.run_number }}
+          PERSEVAL_CODESIGN_IDENTITY: '-'
+        run: scripts/package-macos-app.sh
+
+      - name: Archive the development bundle
+        run: ditto -c -k --keepParent target/macos/Perseval.app target/macos/Perseval-development.zip
+
+      - name: Upload the development bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Perseval-macOS-${{ github.sha }}
+          path: target/macos/Perseval-development.zip
+          if-no-files-found: error
+          retention-days: 14

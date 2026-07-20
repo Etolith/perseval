@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   push:
     branches: [main]
   workflow_dispatch:
@@ -14,10 +17,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos:
-    name: macOS quality and package
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out Perseval
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: macOS Clippy
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -27,30 +44,27 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
 
-      - name: Resolve the locked dependency graph
-        run: cargo metadata --locked --format-version 1 > /dev/null
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Restore Cargo build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
       - name: Run Clippy with warnings denied
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  tests:
+    name: macOS tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out Perseval
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Restore Cargo build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+
       - name: Run the workspace test suite
         run: cargo test --workspace --locked
-
-      - name: Build and verify the macOS bundle
-        env:
-          PERSEVAL_BUILD_NUMBER: ${{ github.run_number }}
-        run: scripts/package-macos-app.sh
-
-      - name: Archive the development bundle
-        run: ditto -c -k --keepParent target/macos/Perseval.app target/macos/Perseval-development.zip
-
-      - name: Upload the development bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: Perseval-macOS-${{ github.sha }}
-          path: target/macos/Perseval-development.zip
-          if-no-files-found: error
-          retention-days: 14

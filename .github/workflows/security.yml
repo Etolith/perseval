@@ -34,26 +34,3 @@ jobs:
       - name: Scan complete Git history
         run: |
           "$RUNNER_TEMP/gitleaks" git --redact --verbose .
-
-  dependencies:
-    name: Rust dependency advisories
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Audit the locked dependency graph
-        # Both ignored advisories currently occur only in Linux display-backend
-        # build dependencies (xcb and wayland-scanner). Perseval ships macOS only;
-        # SECURITY.md records the exact boundary and removal condition.
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
-      - name: Export the dependency license inventory
-        run: |
-          cargo metadata --locked --format-version 1 |
-            jq '[.packages[] | {name, version, license, license_file, source}]' > dependency-licenses.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dependency-license-inventory
-          path: dependency-licenses.json
-          if-no-files-found: error

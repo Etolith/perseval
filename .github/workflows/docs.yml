@@ -1,0 +1,27 @@
+name: Documentation
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  lightweight:
+    name: Lightweight documentation checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out Perseval
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check patch whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git diff --check "$BASE_SHA" "$HEAD_SHA"

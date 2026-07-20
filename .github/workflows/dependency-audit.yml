@@ -1,0 +1,50 @@
+name: Dependency audit
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    name: Rust dependency advisories
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out Perseval
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit the locked dependency graph
+        # Both ignored advisories currently occur only in Linux display-backend
+        # build dependencies (xcb and wayland-scanner). Perseval ships macOS only;
+        # SECURITY.md records the exact boundary and removal condition.
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
+      - name: Export the dependency license inventory
+        run: |
+          cargo metadata --locked --format-version 1 |
+            jq '[.packages[] | {name, version, license, license_file, source}]' > dependency-licenses.json
+
+      - name: Upload the dependency license inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-license-inventory
+          path: dependency-licenses.json
+          if-no-files-found: error
