@@ -31,6 +31,7 @@ use traces_to_evals::{ClusterAssignment, ClusterModel, TraceAlignmentOptions, Tr
 mod assessments;
 mod local_import;
 mod product;
+mod reviews;
 mod writer;
 
 use writer::writer_loop;

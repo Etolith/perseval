@@ -13,9 +13,12 @@ use perseval_service::assessments::{
 };
 use perseval_service::{LiveTraceService, PersevalConfigV1, TaskCompletionQualityCheckDraftV1};
 use perseval_store::{
-    ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION, AssessmentCommitV1, AssessmentItemStatusV1,
-    AssessmentSamplingPolicyV1, CreateProjectV1, PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION,
-    ProjectAssessmentPolicyV1, ReviewAuthorityV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1,
+    ANNOTATION_SCHEMA_RELEASE_SCHEMA_VERSION, ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION,
+    AnnotationLabelV1, AnnotationSchemaReleaseV1, AssessmentCommitV1, AssessmentItemStatusV1,
+    AssessmentPresentationV1, AssessmentSamplingPolicyV1, CreateProjectV1,
+    PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1,
+    REVIEW_SPLIT_RELEASE_SCHEMA_VERSION, ReviewAuthorityV1, ReviewModeV1, ReviewSelectionReasonV1,
+    ReviewSplitReleaseV1, ReviewTaskPresentationV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1,
     SpanUpsertV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionReleaseConfigV1,
     UNASSIGNED_PROJECT_ID, WorkspaceStore, WorkspaceStoreLayout,
 };
@@ -179,8 +182,11 @@ fn span() -> SpanUpsertV1 {
         resource: BTreeMap::from([
             ("perseval.project.id".into(), json!("project-a")),
             ("gen_ai.agent.id".into(), json!("agent-a")),
+            ("gen_ai.conversation.id".into(), json!("session-a")),
             ("service.version".into(), json!("build-1")),
             ("deployment.environment.name".into(), json!("test")),
+            ("enduser.language".into(), json!("en")),
+            ("agent.domain".into(), json!("software-development")),
         ]),
         scope: BTreeMap::new(),
         attributes: BTreeMap::from([
@@ -225,7 +231,13 @@ fn tool_span() -> SpanUpsertV1 {
 
 fn setup() -> (TempDir, WorkspaceStore) {
     let directory = tempfile::tempdir().unwrap();
-    let layout = WorkspaceStoreLayout::new(directory.path());
+    let store = setup_at(directory.path());
+    (directory, store)
+}
+
+fn setup_at(directory: &std::path::Path) -> WorkspaceStore {
+    std::fs::create_dir_all(directory).unwrap();
+    let layout = WorkspaceStoreLayout::new(directory);
     let store = WorkspaceStore::open(&layout, "workspace-a").unwrap();
     store
         .create_project(&CreateProjectV1 {
@@ -249,7 +261,7 @@ fn setup() -> (TempDir, WorkspaceStore) {
     store.advance_lifecycle(i64::MAX / 4, 0, 0).unwrap();
     store.advance_lifecycle(i64::MAX / 4, 0, 0).unwrap();
     assert_eq!(store.list_runs(0, 10).unwrap()[0].finding_count, 0);
-    (directory, store)
+    store
 }
 
 fn activate_context(store: &WorkspaceStore) -> (String, String) {
@@ -1053,6 +1065,964 @@ fn task_completion_executor_retries_transport_and_accounts_provider_usage() {
             .unwrap()
             .context_projection_release_id,
         record.context_projection_release_id
+    );
+}
+
+#[test]
+fn blind_human_review_is_server_embargoed_append_only_and_adjudicated() {
+    let (directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    store
+        .set_project_assessment_policy(
+            &ProjectAssessmentPolicyV1 {
+                schema_version: PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                provider_enabled: true,
+                daily_budget_micros: 1_000_000,
+                per_attempt_budget_micros: 1_000_000,
+                lease_duration_ms: 5_000,
+                maximum_attempts: 1,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 1,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let exact_revisions = vec![("trace-a".into(), 1)];
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    let job = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "pv03-blind-review",
+        )
+        .unwrap();
+    let claim = store
+        .claim_next_assessment("pv03-worker", 0)
+        .unwrap()
+        .unwrap();
+    let store = Arc::new(store);
+    let executor = TaskCompletionAssessmentExecutor::with_runner(
+        store.clone(),
+        Arc::new(RetryThenSucceedTaskCompletionRunner {
+            calls: AtomicUsize::new(1),
+        }),
+    );
+    let commit = executor.execute(&claim);
+    assert_eq!(commit.status, AssessmentItemStatusV1::Succeeded);
+    let assessment = store
+        .commit_assessment_attempt(&claim, &commit)
+        .unwrap()
+        .unwrap();
+    let model_selected_evidence_key = assessment
+        .evaluation
+        .as_ref()
+        .unwrap()
+        .evidence
+        .first()
+        .unwrap()
+        .evidence_key
+        .clone();
+    let evidence_key = "span:span-a".to_string();
+    assert_eq!(
+        store.review_leakage_group_id("trace-a", 1).unwrap(),
+        "session:session-a"
+    );
+
+    let schema = AnnotationSchemaReleaseV1 {
+        schema_version: ANNOTATION_SCHEMA_RELEASE_SCHEMA_VERSION.into(),
+        project_id: "project-a".into(),
+        task_kind: LearnedTaskKind::TaskCompletion,
+        positive_class: "task_failure_or_partial".into(),
+        labels: vec![
+            AnnotationLabelV1::Completed,
+            AnnotationLabelV1::Partial,
+            AnnotationLabelV1::Failed,
+            AnnotationLabelV1::Abstain,
+        ],
+        instructions: "Judge observed task completion without viewing automated output.".into(),
+        required_reviewers: 2,
+        created_by: "review-lead".into(),
+        created_at_unix_ms: 1,
+    };
+    assert!(
+        store
+            .publish_annotation_schema_release(&schema, ReviewAuthorityV1::McpAgent)
+            .is_err(),
+        "MCP must not publish human-review meaning"
+    );
+    let schema_release_id = store
+        .publish_annotation_schema_release(&schema, ReviewAuthorityV1::Human)
+        .unwrap();
+    let case = store
+        .create_annotation_case(
+            "project-a",
+            &schema_release_id,
+            "trace-a",
+            1,
+            &assessment.context_binding_id,
+            &assessment.projection_hash,
+        )
+        .unwrap();
+    let split = ReviewSplitReleaseV1 {
+        schema_version: REVIEW_SPLIT_RELEASE_SCHEMA_VERSION.into(),
+        project_id: "project-a".into(),
+        annotation_schema_release_id: schema_release_id.clone(),
+        group_assignments: BTreeMap::from([(
+            "session:session-a".into(),
+            traces_to_evals::CalibrationDataSplitV1::Calibration,
+        )]),
+        created_by: "review-lead".into(),
+        created_at_unix_ms: 1,
+    };
+    let split_release_id = store
+        .publish_review_split_release(&split, ReviewAuthorityV1::Human)
+        .unwrap();
+    let queue = store
+        .create_review_queue(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &split_release_id,
+            ReviewModeV1::BlindCalibration,
+            1_500,
+            "review-lead-duplicate",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let task = store
+        .enqueue_review_task(
+            &queue.queue_id,
+            &case.case_id,
+            &assessment.assessment_id,
+            ReviewSelectionReasonV1::RandomAudit,
+        )
+        .unwrap();
+    let duplicate_queue = store
+        .create_review_queue(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &split_release_id,
+            ReviewModeV1::BlindCalibration,
+            1_500,
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert!(
+        store
+            .enqueue_review_task(
+                &duplicate_queue.queue_id,
+                &case.case_id,
+                &assessment.assessment_id,
+                ReviewSelectionReasonV1::RandomAudit,
+            )
+            .is_err(),
+        "one exact annotation case cannot inflate calibration through repeated queues"
+    );
+    store
+        .assign_review_task(&task.task_id, "reviewer-a", ReviewAuthorityV1::Human)
+        .unwrap();
+    store
+        .assign_review_task(&task.task_id, "reviewer-b", ReviewAuthorityV1::Human)
+        .unwrap();
+    assert!(
+        store
+            .assign_review_task(&task.task_id, "reviewer-c", ReviewAuthorityV1::Human)
+            .is_err()
+    );
+
+    let blind = store
+        .review_task_for_reviewer(&task.task_id, "reviewer-a")
+        .unwrap();
+    assert!(matches!(blind, ReviewTaskPresentationV1::Blind(_)));
+    let blind_json = serde_json::to_string(&blind).unwrap();
+    assert!(blind_json.contains(&evidence_key));
+    assert!(
+        !blind_json.contains(&model_selected_evidence_key),
+        "blind evidence must not reveal which citation the judge selected"
+    );
+    for forbidden in [
+        "model_reported_confidence",
+        "explanation",
+        "returned_model",
+        "Observed terminal",
+    ] {
+        assert!(
+            !blind_json.contains(forbidden),
+            "blind response leaked {forbidden}: {blind_json}"
+        );
+    }
+    assert!(
+        store
+            .list_trace_assessments("project-a", "trace-a", 1)
+            .is_err()
+    );
+    assert!(store.export_assessment_job(&job.job_id).is_err());
+    assert!(
+        store
+            .assessment_decisions(&assessment.assessment_id)
+            .is_err(),
+        "decision lookup must obey the same blind embargo as raw assessment output"
+    );
+    assert!(matches!(
+        store
+            .list_trace_assessment_presentations("project-a", "trace-a", 1)
+            .unwrap()
+            .as_slice(),
+        [AssessmentPresentationV1::WithheldBlindReview { .. }]
+    ));
+
+    let reviewer_a = store
+        .submit_annotation_revision(
+            &task.task_id,
+            "reviewer-a",
+            None,
+            AnnotationLabelV1::Completed,
+            "Observed evidence shows the requested change and verification.",
+            std::slice::from_ref(&evidence_key),
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert!(
+        store
+            .submit_annotation_revision(
+                &task.task_id,
+                "reviewer-a",
+                None,
+                AnnotationLabelV1::Completed,
+                "A stale correction must not overwrite the head.",
+                std::slice::from_ref(&evidence_key),
+                ReviewAuthorityV1::Human,
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        store
+            .review_task_for_reviewer(&task.task_id, "reviewer-a")
+            .unwrap(),
+        ReviewTaskPresentationV1::Blind(_)
+    ));
+    assert!(matches!(
+        store
+            .review_task_for_reviewer(&task.task_id, "reviewer-b")
+            .unwrap(),
+        ReviewTaskPresentationV1::Blind(_)
+    ));
+
+    let reviewer_a_correction = store
+        .submit_annotation_revision(
+            &task.task_id,
+            "reviewer-a",
+            Some(&reviewer_a.revision_id),
+            AnnotationLabelV1::Failed,
+            "A correction made while the judge remains sealed records that the required outcome was not verified.",
+            std::slice::from_ref(&evidence_key),
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_eq!(reviewer_a_correction.annotation_revision, 2);
+    assert_eq!(
+        reviewer_a_correction.supersedes_revision_id.as_deref(),
+        Some(reviewer_a.revision_id.as_str())
+    );
+
+    let reviewer_b = store
+        .submit_annotation_revision(
+            &task.task_id,
+            "reviewer-b",
+            None,
+            AnnotationLabelV1::Partial,
+            "Observed work exists, but the completion evidence is incomplete.",
+            std::slice::from_ref(&evidence_key),
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let annotation_heads = vec![
+        reviewer_a_correction.revision_id.clone(),
+        reviewer_b.revision_id.clone(),
+    ];
+    assert!(
+        store
+            .review_adjudication_packet(&task.task_id, "reviewer-a")
+            .is_err(),
+        "an independent reviewer cannot inspect an adjudication packet"
+    );
+    let adjudication_packet = store
+        .review_adjudication_packet(&task.task_id, "adjudicator-c")
+        .unwrap();
+    assert_eq!(adjudication_packet.annotation_revisions.len(), 2);
+    assert!(adjudication_packet.evidence_keys.contains(&evidence_key));
+    let sealed_adjudication_json = serde_json::to_string(&adjudication_packet).unwrap();
+    for forbidden in [
+        "returned_model",
+        "provider",
+        "evaluation",
+        "model_reported_confidence",
+        "raw score",
+    ] {
+        assert!(
+            !sealed_adjudication_json.contains(forbidden),
+            "adjudication packet leaked {forbidden}"
+        );
+    }
+    assert!(
+        store
+            .adjudicate_review_task(
+                &task.task_id,
+                &annotation_heads,
+                None,
+                AnnotationLabelV1::Partial,
+                "The required verification is not fully demonstrated.",
+                std::slice::from_ref(&evidence_key),
+                "reviewer-a",
+                ReviewAuthorityV1::Human,
+            )
+            .is_err(),
+        "one of the independent reviewers cannot adjudicate their own disagreement"
+    );
+    let adjudication = store
+        .adjudicate_review_task(
+            &task.task_id,
+            &annotation_heads,
+            None,
+            AnnotationLabelV1::Partial,
+            "The required verification is not fully demonstrated.",
+            std::slice::from_ref(&evidence_key),
+            "adjudicator-c",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .list_trace_assessments("project-a", "trace-a", 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .export_assessment_job(&job.job_id)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+
+    assert_eq!(adjudication.adjudication_revision, 1);
+    assert!(
+        store
+            .submit_annotation_revision(
+                &task.task_id,
+                "reviewer-a",
+                Some(&reviewer_a_correction.revision_id),
+                AnnotationLabelV1::Completed,
+                "A post-reveal correction must start a new blind review round.",
+                std::slice::from_ref(&evidence_key),
+                ReviewAuthorityV1::Human,
+            )
+            .is_err(),
+        "a reviewer cannot revise independent truth after seeing the judge"
+    );
+
+    let control =
+        rusqlite::Connection::open(WorkspaceStoreLayout::new(directory.path()).control_database())
+            .unwrap();
+    assert_eq!(
+        control
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 20",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        control
+            .query_row("SELECT COUNT(*) FROM annotation_revisions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        control
+            .query_row("SELECT COUNT(*) FROM adjudication_revisions", [], |row| row
+                .get::<_, i64>(0),)
+            .unwrap(),
+        1
+    );
+    assert!(
+        control
+            .execute(
+                "UPDATE annotation_revisions SET label = 'completed' WHERE revision_id = ?1",
+                [&reviewer_a.revision_id],
+            )
+            .is_err(),
+        "append-only annotation revisions must reject mutation"
+    );
+}
+
+#[test]
+fn calibration_uses_only_frozen_calibration_groups_and_preserves_prior_decisions() {
+    let (directory, store) = setup();
+    calibration_scenario(directory.path(), store);
+}
+
+#[test]
+#[ignore = "writes the complete PV03 review/calibration state into a disposable QA workspace"]
+fn pv03_review_calibration_ui_fixture() {
+    let directory = std::env::var("PERSEVAL_PV03_QA_WORKSPACE")
+        .expect("PERSEVAL_PV03_QA_WORKSPACE must point at an empty disposable directory");
+    let directory = std::path::Path::new(&directory);
+    assert!(
+        !directory.join("control.sqlite3").exists(),
+        "PV03 QA workspace must be empty"
+    );
+    let store = setup_at(directory);
+    calibration_scenario(directory, store);
+    println!("PV03 QA workspace seeded at {}", directory.display());
+}
+
+fn calibration_scenario(directory: &std::path::Path, store: WorkspaceStore) {
+    let mut trace_ids = vec!["trace-a".to_string()];
+    for index in 1..6 {
+        let logical_trace_id = format!("trace-{index}");
+        let root_span_id = format!("span-{index}");
+        let tool_span_id = format!("span-tool-{index}");
+        let mut root = span();
+        root.external_trace_id = logical_trace_id.clone();
+        root.logical_trace_id = logical_trace_id.clone();
+        root.external_span_id = root_span_id.clone();
+        root.resource.insert(
+            "gen_ai.conversation.id".into(),
+            json!(format!("session-{index}")),
+        );
+        let mut tool = tool_span();
+        tool.external_trace_id = logical_trace_id.clone();
+        tool.logical_trace_id = logical_trace_id.clone();
+        tool.external_span_id = tool_span_id;
+        tool.external_parent_span_id = Some(root_span_id);
+        tool.resource.insert(
+            "gen_ai.conversation.id".into(),
+            json!(format!("session-{index}")),
+        );
+        let mut batch = SpanUpsertBatchV1 {
+            schema_version: SPAN_UPSERT_SCHEMA_VERSION.into(),
+            source_id: "test".into(),
+            received_at_unix_ms: 2 + index,
+            spans: vec![root, tool],
+            rejected_spans: 0,
+            rejection_message: None,
+        };
+        let receipt = store
+            .journal_batch(
+                &mut batch,
+                format!("calibration-{index}").as_bytes(),
+                "test",
+                4096,
+            )
+            .unwrap();
+        store.project_journal(receipt.journal_sequence).unwrap();
+        trace_ids.push(logical_trace_id);
+    }
+    store.advance_lifecycle(i64::MAX / 4, 0, 0).unwrap();
+    store.advance_lifecycle(i64::MAX / 4, 0, 0).unwrap();
+
+    let (context_release_id, rule_id) = activate_context(&store);
+    for logical_trace_id in trace_ids.iter().skip(1) {
+        store
+            .bind_finalized_trace_context("project-a", logical_trace_id, 1, &rule_id, None)
+            .unwrap();
+    }
+    let (evaluator, config) = task_completion_release(&context_release_id);
+    let evaluator_release_id = store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    store
+        .set_project_assessment_policy(
+            &ProjectAssessmentPolicyV1 {
+                schema_version: PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                provider_enabled: true,
+                daily_budget_micros: 10_000_000,
+                per_attempt_budget_micros: 1_000_000,
+                lease_duration_ms: 5_000,
+                maximum_attempts: 1,
+                updated_by: "human-reviewer".into(),
+                updated_at_unix_ms: 1,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let exact_revisions = trace_ids
+        .iter()
+        .map(|trace_id| (trace_id.clone(), 1))
+        .collect::<Vec<_>>();
+    let preview = store
+        .preview_assessment_backfill("project-a", &evaluator_release_id, &exact_revisions)
+        .unwrap();
+    let job = store
+        .enqueue_assessment_job_from_preview(
+            "project-a",
+            &evaluator_release_id,
+            &exact_revisions,
+            &preview.selection_hash,
+            "pv03-calibration",
+        )
+        .unwrap();
+    let store = Arc::new(store);
+    let executor = TaskCompletionAssessmentExecutor::with_runner(
+        store.clone(),
+        Arc::new(RetryThenSucceedTaskCompletionRunner {
+            calls: AtomicUsize::new(1),
+        }),
+    );
+    while let Some(claim) = store
+        .claim_next_assessment("pv03-calibration-worker", 0)
+        .unwrap()
+    {
+        let commit = executor.execute(&claim);
+        assert_eq!(commit.status, AssessmentItemStatusV1::Succeeded);
+        store
+            .commit_assessment_attempt(&claim, &commit)
+            .unwrap()
+            .unwrap();
+    }
+    let export = store.export_assessment_job(&job.job_id).unwrap();
+    assert_eq!(export.items.len(), 6);
+
+    let schema = AnnotationSchemaReleaseV1 {
+        schema_version: ANNOTATION_SCHEMA_RELEASE_SCHEMA_VERSION.into(),
+        project_id: "project-a".into(),
+        task_kind: LearnedTaskKind::TaskCompletion,
+        positive_class: "task_failure_or_partial".into(),
+        labels: vec![
+            AnnotationLabelV1::Completed,
+            AnnotationLabelV1::Partial,
+            AnnotationLabelV1::Failed,
+            AnnotationLabelV1::Abstain,
+        ],
+        instructions: "Use observed trace evidence only.".into(),
+        required_reviewers: 2,
+        created_by: "review-lead".into(),
+        created_at_unix_ms: 2,
+    };
+    let schema_release_id = store
+        .publish_annotation_schema_release(&schema, ReviewAuthorityV1::Human)
+        .unwrap();
+    let group_assignments = trace_ids
+        .iter()
+        .enumerate()
+        .map(|(index, trace_id)| {
+            (
+                store.review_leakage_group_id(trace_id, 1).unwrap(),
+                if index < 4 {
+                    traces_to_evals::CalibrationDataSplitV1::Calibration
+                } else {
+                    traces_to_evals::CalibrationDataSplitV1::Test
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let test_trace_ids = trace_ids.iter().skip(4).cloned().collect::<BTreeSet<_>>();
+    let split_release_id = store
+        .publish_review_split_release(
+            &ReviewSplitReleaseV1 {
+                schema_version: REVIEW_SPLIT_RELEASE_SCHEMA_VERSION.into(),
+                project_id: "project-a".into(),
+                annotation_schema_release_id: schema_release_id.clone(),
+                group_assignments,
+                created_by: "review-lead".into(),
+                created_at_unix_ms: 2,
+            },
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let queue = store
+        .create_review_queue(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &split_release_id,
+            ReviewModeV1::BlindCalibration,
+            1_500,
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let mut test_annotation_revision_ids = BTreeSet::new();
+    let mut held_out_task = None;
+    for (index, item) in export.items.iter().enumerate() {
+        let assessment = item.assessment.as_ref().unwrap();
+        let case = store
+            .create_annotation_case(
+                "project-a",
+                &schema_release_id,
+                &assessment.logical_trace_id,
+                assessment.revision,
+                &assessment.context_binding_id,
+                &assessment.projection_hash,
+            )
+            .unwrap();
+        let task = store
+            .enqueue_review_task(
+                &queue.queue_id,
+                &case.case_id,
+                &assessment.assessment_id,
+                if index % 2 == 0 {
+                    ReviewSelectionReasonV1::RandomAudit
+                } else {
+                    ReviewSelectionReasonV1::ActiveLearning
+                },
+            )
+            .unwrap();
+        if test_trace_ids.contains(&assessment.logical_trace_id) && held_out_task.is_none() {
+            held_out_task = Some((
+                task.task_id.clone(),
+                assessment.logical_trace_id.clone(),
+                assessment.revision,
+            ));
+        }
+        let label = if index % 2 == 0 {
+            AnnotationLabelV1::Completed
+        } else {
+            AnnotationLabelV1::Failed
+        };
+        let evidence_key = format!(
+            "span:{}",
+            assessment.logical_trace_id.replacen("trace", "span", 1)
+        );
+        for reviewer in ["reviewer-a", "reviewer-b"] {
+            store
+                .assign_review_task(&task.task_id, reviewer, ReviewAuthorityV1::Human)
+                .unwrap();
+            let annotation = store
+                .submit_annotation_revision(
+                    &task.task_id,
+                    reviewer,
+                    None,
+                    label,
+                    "Independent review resolved the observed task outcome.",
+                    std::slice::from_ref(&evidence_key),
+                    ReviewAuthorityV1::Human,
+                )
+                .unwrap();
+            if test_trace_ids.contains(&assessment.logical_trace_id) {
+                test_annotation_revision_ids.insert(annotation.revision_id);
+            }
+        }
+    }
+
+    let (held_out_task_id, held_out_trace_id, held_out_revision) = held_out_task.unwrap();
+    assert!(matches!(
+        store
+            .review_task_for_reviewer(&held_out_task_id, "reviewer-a")
+            .unwrap(),
+        ReviewTaskPresentationV1::Blind(_)
+    ));
+    assert!(matches!(
+        store
+            .list_trace_assessment_presentations(
+                "project-a",
+                &held_out_trace_id,
+                held_out_revision,
+            )
+            .unwrap()
+            .as_slice(),
+        [AssessmentPresentationV1::WithheldBlindReview { .. }]
+    ));
+    assert!(
+        store.export_assessment_job(&job.job_id).is_err(),
+        "completed held-out tasks stay sealed until thresholds are frozen"
+    );
+
+    let (calibration_release_id, calibration) = store
+        .publish_calibration_release(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &split_release_id,
+            traces_to_evals::BinaryCalibrationFitOptionsV1::default(),
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_eq!(calibration.model.calibration_observations, 4);
+    assert_eq!(calibration.fit_report.attempted_count, 4);
+    assert!(
+        ["build", "domain", "environment", "language"]
+            .into_iter()
+            .all(
+                |dimension| calibration.fit_slice_reports.iter().any(|slice| {
+                    slice.dimension == dimension && slice.report.attempted_count == 4
+                })
+            ),
+        "fit slice reports must bind exact revision metadata"
+    );
+    assert!(calibration.fit_slice_reports.iter().any(|slice| {
+        slice.dimension == "selection stream"
+            && slice.value == "random audit"
+            && slice.report.attempted_count == 2
+    }));
+    assert!(calibration.fit_slice_reports.iter().any(|slice| {
+        slice.dimension == "selection stream"
+            && slice.value == "active selection"
+            && slice.report.attempted_count == 2
+    }));
+    assert_eq!(calibration.agreement_report.krippendorff_alpha, Some(1.0));
+    assert_eq!(
+        calibration
+            .ordinal_agreement_report
+            .as_ref()
+            .and_then(|report| report.quadratic_weighted_kappa),
+        Some(1.0)
+    );
+    assert!(
+        calibration
+            .fit_annotation_revision_ids
+            .iter()
+            .all(|revision_id| !test_annotation_revision_ids.contains(revision_id))
+    );
+
+    let mut cumulative_split = store.review_split_release(&split_release_id).unwrap();
+    cumulative_split.group_assignments.insert(
+        "session:future-arrival".into(),
+        traces_to_evals::CalibrationDataSplitV1::Calibration,
+    );
+    cumulative_split.created_at_unix_ms = 999;
+    let cumulative_split_id = store
+        .publish_review_split_release(&cumulative_split, ReviewAuthorityV1::Human)
+        .unwrap();
+    let (successor_calibration_release_id, cumulative_release) = store
+        .publish_calibration_release(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &cumulative_split_id,
+            traces_to_evals::BinaryCalibrationFitOptionsV1::default(),
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert_ne!(successor_calibration_release_id, calibration_release_id);
+    assert_eq!(
+        cumulative_release.model.calibration_observations, 4,
+        "a cumulative immutable split must compose completed cases from predecessor queues"
+    );
+    assert!(
+        store
+            .publish_calibration_test_report(&successor_calibration_release_id)
+            .is_err(),
+        "held-out labels stay sealed until thresholds are frozen"
+    );
+    let (first_policy_id, _) = store
+        .publish_threshold_policy_release(
+            "project-a",
+            &evaluator_release_id,
+            &successor_calibration_release_id,
+            0.2,
+            0.8,
+            0.5,
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert!(matches!(
+        store
+            .review_task_for_reviewer(&held_out_task_id, "reviewer-a")
+            .unwrap(),
+        ReviewTaskPresentationV1::Revealed(_)
+    ));
+    assert!(
+        store.export_assessment_job(&job.job_id).is_ok(),
+        "freezing thresholds unlocks held-out model output without fitting on test labels"
+    );
+    assert!(
+        store
+            .publish_threshold_policy_release(
+                "project-a",
+                &evaluator_release_id,
+                &successor_calibration_release_id,
+                0.1,
+                0.4,
+                0.5,
+                "review-lead",
+                ReviewAuthorityV1::Human,
+            )
+            .is_err(),
+        "one calibration release has exactly one pre-test frozen policy"
+    );
+    assert!(
+        store
+            .activate_threshold_policy(&first_policy_id, "review-lead", ReviewAuthorityV1::Human,)
+            .is_err(),
+        "activation waits for the one-shot held-out report"
+    );
+    let test_report = store
+        .publish_calibration_test_report(&successor_calibration_release_id)
+        .unwrap();
+    assert_eq!(
+        test_report.split,
+        traces_to_evals::CalibrationDataSplitV1::Test
+    );
+    assert_eq!(test_report.report.attempted_count, 2);
+    assert!(
+        ["build", "domain", "environment", "language"]
+            .into_iter()
+            .all(|dimension| test_report.slice_reports.iter().any(|slice| {
+                slice.dimension == dimension && slice.report.attempted_count == 2
+            })),
+        "held-out slice reports must use the frozen test membership"
+    );
+    assert!(test_report.slice_reports.iter().any(|slice| {
+        slice.dimension == "selection stream"
+            && slice.value == "random audit"
+            && slice.report.attempted_count == 1
+    }));
+    assert!(test_report.slice_reports.iter().any(|slice| {
+        slice.dimension == "selection stream"
+            && slice.value == "active selection"
+            && slice.report.attempted_count == 1
+    }));
+    assert_eq!(test_report.threshold_policy_release_id, first_policy_id);
+    assert_eq!(
+        test_report
+            .annotation_revision_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        test_annotation_revision_ids
+    );
+
+    assert!(
+        store
+            .activate_threshold_policy(&first_policy_id, "codex", ReviewAuthorityV1::McpAgent,)
+            .is_err()
+    );
+    let activation_error = store
+        .activate_threshold_policy(&first_policy_id, "review-lead", ReviewAuthorityV1::Human)
+        .unwrap_err();
+    assert!(
+        activation_error
+            .to_string()
+            .contains("current random cohort has 3 labels"),
+        "selected cases must not inflate the random-audit population gate: {activation_error}"
+    );
+    let control =
+        rusqlite::Connection::open(WorkspaceStoreLayout::new(directory).control_database())
+            .unwrap();
+    control
+        .execute(
+            "INSERT INTO threshold_policy_activations(
+                activation_id, project_id, evaluator_release_id,
+                threshold_policy_release_id, activation_json, activated_at_unix_ms
+             ) VALUES ('test-first-activation', 'project-a', ?1, ?2, '{}', 100)",
+            rusqlite::params![evaluator_release_id, first_policy_id],
+        )
+        .unwrap();
+    drop(control);
+    let target_assessment = export.items[0].assessment.as_ref().unwrap();
+    let assessment_before = serde_json::to_vec(target_assessment).unwrap();
+    let first_decision = store
+        .materialize_assessment_decision(&target_assessment.assessment_id, &first_policy_id)
+        .unwrap();
+    let second_fit_options = traces_to_evals::BinaryCalibrationFitOptionsV1 {
+        l2_lambda: 0.2,
+        ..Default::default()
+    };
+    let (second_calibration_release_id, _) = store
+        .publish_calibration_release(
+            "project-a",
+            &evaluator_release_id,
+            &schema_release_id,
+            &split_release_id,
+            second_fit_options,
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    let (second_policy_id, _) = store
+        .publish_threshold_policy_release(
+            "project-a",
+            &evaluator_release_id,
+            &second_calibration_release_id,
+            0.1,
+            0.4,
+            0.5,
+            "review-lead",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+    assert!(
+        store
+            .materialize_assessment_decision(&target_assessment.assessment_id, &second_policy_id,)
+            .is_err(),
+        "an unactivated policy cannot materialize a product decision"
+    );
+    store
+        .publish_calibration_test_report(&second_calibration_release_id)
+        .unwrap();
+    let control =
+        rusqlite::Connection::open(WorkspaceStoreLayout::new(directory).control_database())
+            .unwrap();
+    control
+        .execute(
+            "INSERT INTO threshold_policy_activations(
+                activation_id, project_id, evaluator_release_id,
+                threshold_policy_release_id, activation_json, activated_at_unix_ms
+             ) VALUES ('test-second-activation', 'project-a', ?1, ?2, '{}', 101)",
+            rusqlite::params![evaluator_release_id, second_policy_id],
+        )
+        .unwrap();
+    drop(control);
+    let second_decision = store
+        .materialize_assessment_decision(&target_assessment.assessment_id, &second_policy_id)
+        .unwrap();
+    assert_ne!(first_policy_id, second_policy_id);
+    assert_ne!(first_decision.decision_id, second_decision.decision_id);
+    assert_eq!(
+        store
+            .assessment_decisions(&target_assessment.assessment_id)
+            .unwrap()
+            .len(),
+        2
+    );
+    let assessment_after = store
+        .list_trace_assessments(
+            "project-a",
+            &target_assessment.logical_trace_id,
+            target_assessment.revision,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.assessment_id == target_assessment.assessment_id)
+        .unwrap();
+    assert_eq!(
+        assessment_before,
+        serde_json::to_vec(&assessment_after).unwrap()
     );
 }
 

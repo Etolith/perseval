@@ -923,6 +923,19 @@ impl FailureInbox {
                 .flex_col()
                 .gap_3();
             if self.trace_assessments.is_empty() {
+                let message = if self.withheld_assessment_count > 0 {
+                    format!(
+                        "{} automated review{} sealed until blind human review is complete. The trace remains available without leaking the judge output.",
+                        self.withheld_assessment_count,
+                        if self.withheld_assessment_count == 1 {
+                            " is"
+                        } else {
+                            "s are"
+                        }
+                    )
+                } else {
+                    "No automated reviews exist for this exact trace revision. Deterministic findings are not shown as learned reviews.".into()
+                };
                 panel = panel.child(
                     div()
                         .p_3()
@@ -930,7 +943,7 @@ impl FailureInbox {
                         .bg(Theme::BG)
                         .text_xs()
                         .text_color(Theme::DIM)
-                        .child("No automated reviews exist for this exact trace revision. Deterministic findings are not shown as learned reviews."),
+                        .child(message),
                 );
             }
             for (assessment_index, assessment) in self.trace_assessments.iter().enumerate() {
@@ -949,9 +962,29 @@ impl FailureInbox {
                     .and_then(|evaluation| evaluation.model_reported_confidence)
                     .map(|confidence| format!("{confidence:.3}"))
                     .unwrap_or_else(|| "not reported".into());
-                // Calibration is a separate immutable decision introduced by PV-03.
-                // Never present raw model confidence as a calibrated probability.
-                let calibrated_probability = "not calibrated";
+                let decisions = self
+                    .trace_assessment_decisions
+                    .get(&assessment.assessment_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let calibrated_summary = if decisions.is_empty() {
+                    "No calibrated decision exists".into()
+                } else {
+                    decisions
+                        .iter()
+                        .map(|decision| {
+                            let probability = decision
+                                .calibrated_failure_probability
+                                .map(|value| format!("{value:.3}"))
+                                .unwrap_or_else(|| "not available".into());
+                            format!(
+                                "{} at failure probability {probability}",
+                                calibrated_decision_label(decision.decision)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
                 let projection_policy = assessment
                     .projection_policy
                     .map(review_projection_policy_label)
@@ -961,7 +994,7 @@ impl FailureInbox {
                     .map(|reason| format!(" · {}", review_abstention_label(reason)))
                     .unwrap_or_default();
                 let card_label = format!(
-                    "Automated review {verdict}{abstention}. {explanation}. Raw judge score {score}. Model-reported confidence {confidence}. Calibrated failure probability {calibrated_probability}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}. Projection policy {projection_policy}.",
+                    "Automated output {verdict}{abstention}. {explanation}. Raw judge score {score}. Model-reported confidence {confidence}. {calibrated_summary}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}. Projection policy {projection_policy}.",
                     assessment.cost_micros as f64 / 1_000_000.0,
                     assessment.latency_ms,
                     short_review_identity(&assessment.evaluator_release_id),
@@ -984,7 +1017,14 @@ impl FailureInbox {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{verdict}{abstention}")),
+                            .child("AUTOMATED OUTPUT")
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{verdict}{abstention}")),
+                            ),
                     )
                     .child(
                         div()
@@ -999,7 +1039,7 @@ impl FailureInbox {
                             .text_xs()
                             .text_color(Theme::DIM)
                             .child(format!(
-                                "Raw judge score {score}\nModel-reported confidence {confidence}\nCalibrated failure probability {calibrated_probability}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProjection release {}\nContext projection release {}\nProjection policy {projection_policy}\nApplicability taxonomy {}\nProvider {} · requested {} · returned {}",
+                                "Raw judge score {score}\nModel-reported confidence {confidence}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProjection release {}\nContext projection release {}\nProjection policy {projection_policy}\nApplicability taxonomy {}\nProvider {} · requested {} · returned {}",
                                 assessment.cost_micros as f64 / 1_000_000.0,
                                 assessment.latency_ms,
                                 short_review_identity(&assessment.evaluator_release_id),
@@ -1030,6 +1070,57 @@ impl FailureInbox {
                                 assessment.returned_model.as_deref().unwrap_or("none")
                             )),
                     );
+                if decisions.is_empty() {
+                    card = card.child(
+                        div()
+                            .mt_3()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(Theme::BORDER)
+                            .text_xs()
+                            .text_color(Theme::DIM)
+                            .child("CALIBRATED DECISION")
+                            .child(div().mt_1().child(
+                                "Not calibrated. Raw model confidence is not a substitute.",
+                            )),
+                    );
+                } else {
+                    for (decision_index, decision) in decisions.iter().enumerate() {
+                        let probability = decision
+                            .calibrated_failure_probability
+                            .map(|value| format!("{value:.3}"))
+                            .unwrap_or_else(|| "not available".into());
+                        card = card.child(
+                            div()
+                                .id((
+                                    "calibrated-decision",
+                                    assessment_index * 100 + decision_index,
+                                ))
+                                .mt_3()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(Theme::BORDER)
+                                .text_xs()
+                                .text_color(Theme::DIM)
+                                .child("CALIBRATED DECISION")
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .text_color(Theme::TEXT)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(format!(
+                                            "{} · failure probability {probability}",
+                                            calibrated_decision_label(decision.decision)
+                                        )),
+                                )
+                                .child(format!(
+                                    "Calibration {}\nThreshold policy {}",
+                                    short_review_identity(&decision.calibration_release_id),
+                                    short_review_identity(&decision.threshold_policy_release_id)
+                                )),
+                        );
+                    }
+                }
                 if let Some(evaluation) = evaluation {
                     for (evidence_index, citation) in evaluation.evidence.iter().enumerate() {
                         if let Some(span_id) = review_evidence_span_id(&citation.location) {
@@ -1436,6 +1527,16 @@ fn review_status_label(status: perseval_service::AssessmentItemStatusV1) -> &'st
         PrivacyBlocked => "Blocked by privacy policy",
         ProviderUnavailable => "Provider unavailable",
         NotApplicable => "Not applicable",
+    }
+}
+
+fn calibrated_decision_label(decision: perseval_service::CalibratedDecisionV1) -> &'static str {
+    use perseval_service::CalibratedDecisionV1::*;
+    match decision {
+        Pass => "Pass",
+        Fail => "Fail",
+        Review => "Human review",
+        Abstain => "Abstain",
     }
 }
 

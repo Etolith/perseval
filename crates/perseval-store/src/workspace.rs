@@ -7,6 +7,7 @@ mod ingest;
 mod projection;
 mod projects;
 mod read;
+mod reviews;
 mod schema;
 mod span_tree;
 mod taxonomy;

@@ -11,14 +11,20 @@ use perseval_service::{
 use crate::components::{button, button_state, tag, telemetry_gap_summary};
 use crate::design::Theme;
 
+mod calibration;
+mod human_review;
 mod studio;
 
+use calibration::CalibrationScreen;
+use human_review::{HumanReviewEvent, HumanReviewScreen};
 use studio::QualityCheckStudio;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvalsView {
     Studio,
-    ReviewQueue,
+    EvalDrafts,
+    HumanReview,
+    Calibration,
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +33,10 @@ pub(crate) enum EvalReviewEvent {
         project_id: String,
         candidate_id: String,
     },
-    Queue,
+    QualityChecks,
+    EvalDrafts,
+    HumanReviews,
+    Calibration,
     SourceTrace {
         project_id: String,
         logical_trace_id: String,
@@ -48,6 +57,8 @@ pub(crate) struct EvalReviewScreen {
     request_generation: u64,
     view: EvalsView,
     studio: Entity<QualityCheckStudio>,
+    human_review: Entity<HumanReviewScreen>,
+    calibration: Entity<CalibrationScreen>,
 }
 
 impl EventEmitter<EvalReviewEvent> for EvalReviewScreen {}
@@ -59,9 +70,28 @@ impl EvalReviewScreen {
         reviewer_ref: String,
         cx: &mut Context<Self>,
     ) -> Self {
+        let studio_reviewer = reviewer_ref.clone();
         let studio = cx.new(|cx| {
-            QualityCheckStudio::new(service.clone(), project_id.clone(), reviewer_ref, cx)
+            QualityCheckStudio::new(service.clone(), project_id.clone(), studio_reviewer, cx)
         });
+        let human_review =
+            cx.new(|cx| HumanReviewScreen::new(service.clone(), project_id.clone(), cx));
+        cx.subscribe(&human_review, |_, _, event, cx| match event {
+            HumanReviewEvent::SourceTrace {
+                project_id,
+                logical_trace_id,
+                revision,
+                selected_span_id,
+            } => cx.emit(EvalReviewEvent::SourceTrace {
+                project_id: project_id.clone(),
+                logical_trace_id: logical_trace_id.clone(),
+                revision: *revision,
+                selected_span_id: selected_span_id.clone(),
+            }),
+        })
+        .detach();
+        let calibration =
+            cx.new(|cx| CalibrationScreen::new(service.clone(), project_id.clone(), cx));
         let mut screen = Self {
             service,
             project_id,
@@ -74,6 +104,8 @@ impl EvalReviewScreen {
             request_generation: 0,
             view: EvalsView::Studio,
             studio,
+            human_review,
+            calibration,
         };
         screen.reload(cx);
         screen
@@ -88,15 +120,35 @@ impl EvalReviewScreen {
         self.studio.update(cx, |studio, cx| {
             studio.set_project_scope(studio_project_id, cx)
         });
+        let review_project_id = self.project_id.clone();
+        self.human_review.update(cx, |review, cx| {
+            review.set_project_scope(review_project_id, cx)
+        });
+        let calibration_project_id = self.project_id.clone();
+        self.calibration.update(cx, |calibration, cx| {
+            calibration.set_project_scope(calibration_project_id, cx)
+        });
         self.selected = None;
         self.notice = None;
         self.reload(cx);
     }
 
     pub(crate) fn show_queue(&mut self, cx: &mut Context<Self>) {
-        self.view = EvalsView::ReviewQueue;
+        self.view = EvalsView::EvalDrafts;
         self.selected = None;
         self.reload(cx);
+    }
+
+    pub(crate) fn show_human_reviews(&mut self, cx: &mut Context<Self>) {
+        self.view = EvalsView::HumanReview;
+        self.selected = None;
+        cx.notify();
+    }
+
+    pub(crate) fn show_calibration(&mut self, cx: &mut Context<Self>) {
+        self.view = EvalsView::Calibration;
+        self.selected = None;
+        cx.notify();
     }
 
     pub(crate) fn show_studio(&mut self, cx: &mut Context<Self>) {
@@ -185,7 +237,52 @@ impl EvalReviewScreen {
     }
 
     fn open_queue(&mut self, cx: &mut Context<Self>) {
-        cx.emit(EvalReviewEvent::Queue);
+        cx.emit(EvalReviewEvent::EvalDrafts);
+    }
+
+    fn open_quality_checks(&mut self, cx: &mut Context<Self>) {
+        cx.emit(EvalReviewEvent::QualityChecks);
+    }
+
+    fn open_human_reviews(&mut self, cx: &mut Context<Self>) {
+        cx.emit(EvalReviewEvent::HumanReviews);
+    }
+
+    fn open_calibration(&mut self, cx: &mut Context<Self>) {
+        cx.emit(EvalReviewEvent::Calibration);
+    }
+
+    fn render_destination_bar(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .h(px(42.))
+            .flex_none()
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_1()
+            .border_b_1()
+            .border_color(Theme::BORDER)
+            .bg(Theme::PANEL)
+            .child(
+                button("Quality checks", self.view == EvalsView::Studio)
+                    .id("evals-quality-checks")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_quality_checks(cx))),
+            )
+            .child(
+                button("Review Queue", self.view == EvalsView::HumanReview)
+                    .id("evals-human-review")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_human_reviews(cx))),
+            )
+            .child(
+                button("Calibration", self.view == EvalsView::Calibration)
+                    .id("evals-calibration")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_calibration(cx))),
+            )
+            .child(
+                button("Eval drafts", self.view == EvalsView::EvalDrafts)
+                    .id("evals-drafts")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_queue(cx))),
+            )
     }
 
     fn selected_candidate_index(&self) -> Option<usize> {
@@ -836,10 +933,20 @@ impl Render for EvalReviewScreen {
         if let Some(candidate) = &self.selected {
             self.render_candidate(candidate, compact, cx)
                 .into_any_element()
-        } else if self.view == EvalsView::Studio {
-            self.studio.clone().into_any_element()
         } else {
-            self.render_queue(compact, cx).into_any_element()
+            let body = match self.view {
+                EvalsView::Studio => self.studio.clone().into_any_element(),
+                EvalsView::EvalDrafts => self.render_queue(compact, cx).into_any_element(),
+                EvalsView::HumanReview => self.human_review.clone().into_any_element(),
+                EvalsView::Calibration => self.calibration.clone().into_any_element(),
+            };
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.render_destination_bar(cx))
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element()
         }
     }
 }
