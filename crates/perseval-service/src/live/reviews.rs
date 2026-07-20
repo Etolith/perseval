@@ -349,7 +349,14 @@ impl LiveTraceService {
         task_id: &str,
     ) -> Result<ReviewTaskPresentationV1, LiveServiceError> {
         let reviewer_id = self.config.reviewer_ref.as_str();
-        Ok(self.store.review_task_for_reviewer(task_id, reviewer_id)?)
+        self.store
+            .review_task_for_reviewer(task_id, reviewer_id)
+            .map_err(|error| match error {
+                perseval_store::StoreError::ReviewNotAssigned => {
+                    LiveServiceError::ReviewNotAssigned
+                }
+                error => LiveServiceError::Store(error),
+            })
     }
 
     pub fn review_adjudication_packet(

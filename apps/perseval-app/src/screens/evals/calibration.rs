@@ -227,6 +227,20 @@ impl CalibrationScreen {
             cx.notify();
             return;
         };
+        if !pass.is_finite()
+            || !fail.is_finite()
+            || !confidence.is_finite()
+            || !(0.0..=1.0).contains(&pass)
+            || !(0.0..=1.0).contains(&fail)
+            || pass >= fail
+            || !(0.5..=1.0).contains(&confidence)
+        {
+            self.error = Some(
+                "Pass and fail thresholds must satisfy 0 ≤ pass < fail ≤ 1, and minimum confidence must be between 0.5 and 1.".into(),
+            );
+            cx.notify();
+            return;
+        }
         self.busy = true;
         self.error = None;
         let service = self.service.clone();

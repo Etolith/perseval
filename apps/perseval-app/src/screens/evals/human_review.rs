@@ -227,8 +227,8 @@ impl HumanReviewScreen {
                         this.presentation = Some(presentation);
                         this.notice = None;
                     }
-                    Err(error)
-                        if !report_unassigned && error.to_string().contains("not assigned") =>
+                    Err(perseval_service::LiveServiceError::ReviewNotAssigned)
+                        if !report_unassigned =>
                     {
                         this.presentation = None;
                     }

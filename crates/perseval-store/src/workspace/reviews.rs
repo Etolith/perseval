@@ -766,7 +766,7 @@ impl WorkspaceStore {
             ));
         }
         load_assignment(&transaction, task_id, reviewer_id)?
-            .ok_or_else(|| StoreError::Invalid("reviewer is not assigned to this task".into()))?;
+            .ok_or(StoreError::ReviewNotAssigned)?;
         validate_evidence_keys(&transaction, &task.case_id, evidence_keys)?;
         let annotation_id = review_identity(
             "perseval.annotation.v1",
@@ -880,9 +880,8 @@ impl WorkspaceStore {
             let control = self.control.lock().expect("control store lock poisoned");
             let task = load_task(&control, task_id)?;
             let queue = load_queue(&control, &task.queue_id)?;
-            let assignment = load_assignment(&control, task_id, reviewer_id)?.ok_or_else(|| {
-                StoreError::Invalid("reviewer is not assigned to this task".into())
-            })?;
+            let assignment = load_assignment(&control, task_id, reviewer_id)?
+                .ok_or(StoreError::ReviewNotAssigned)?;
             let annotation_schema = load_json_by_id::<AnnotationSchemaReleaseV1>(
                 &control,
                 "SELECT release_json FROM annotation_schema_releases

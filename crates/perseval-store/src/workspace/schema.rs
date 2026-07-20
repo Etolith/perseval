@@ -1106,6 +1106,14 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
             BEFORE DELETE ON calibration_releases BEGIN
                SELECT RAISE(ABORT, 'calibration releases are immutable');
             END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_report_update
+            BEFORE UPDATE ON calibration_reports BEGIN
+               SELECT RAISE(ABORT, 'calibration reports are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_report_delete
+            BEFORE DELETE ON calibration_reports BEGIN
+               SELECT RAISE(ABORT, 'calibration reports are immutable');
+            END;
          CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_release_update
             BEFORE UPDATE ON threshold_policy_releases BEGIN
                SELECT RAISE(ABORT, 'threshold policy releases are immutable');
@@ -1113,6 +1121,14 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
          CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_release_delete
             BEFORE DELETE ON threshold_policy_releases BEGIN
                SELECT RAISE(ABORT, 'threshold policy releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_activation_update
+            BEFORE UPDATE ON threshold_policy_activations BEGIN
+               SELECT RAISE(ABORT, 'threshold policy activations are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_activation_delete
+            BEFORE DELETE ON threshold_policy_activations BEGIN
+               SELECT RAISE(ABORT, 'threshold policy activations are immutable');
             END;
          CREATE TRIGGER IF NOT EXISTS immutable_assessment_decision_update
             BEFORE UPDATE ON assessment_decisions BEGIN

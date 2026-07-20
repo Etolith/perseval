@@ -119,6 +119,8 @@ pub enum LiveServiceError {
     InvalidImport(String),
     #[error("invalid request: {0}")]
     InvalidInput(String),
+    #[error("reviewer is not assigned to this task")]
+    ReviewNotAssigned,
 }
 
 #[derive(Debug, Clone, Default)]

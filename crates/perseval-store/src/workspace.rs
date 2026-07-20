@@ -74,6 +74,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("invalid persisted value: {0}")]
     Invalid(String),
+    #[error("reviewer is not assigned to this task")]
+    ReviewNotAssigned,
     #[error("operation cancelled")]
     Cancelled,
 }

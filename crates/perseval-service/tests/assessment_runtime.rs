@@ -19,8 +19,8 @@ use perseval_store::{
     PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1,
     REVIEW_SPLIT_RELEASE_SCHEMA_VERSION, ReviewAuthorityV1, ReviewModeV1, ReviewSelectionReasonV1,
     ReviewSplitReleaseV1, ReviewTaskPresentationV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1,
-    SpanUpsertV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionReleaseConfigV1,
-    UNASSIGNED_PROJECT_ID, WorkspaceStore, WorkspaceStoreLayout,
+    SpanUpsertV1, StoreError, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION,
+    TaskCompletionReleaseConfigV1, UNASSIGNED_PROJECT_ID, WorkspaceStore, WorkspaceStoreLayout,
 };
 use rusqlite::params;
 use serde_json::json;
@@ -1235,6 +1235,12 @@ fn blind_human_review_is_server_embargoed_append_only_and_adjudicated() {
             .is_err(),
         "one exact annotation case cannot inflate calibration through repeated queues"
     );
+    assert!(matches!(
+        store
+            .review_task_for_reviewer(&task.task_id, "reviewer-unassigned")
+            .unwrap_err(),
+        StoreError::ReviewNotAssigned
+    ));
     store
         .assign_review_task(&task.task_id, "reviewer-a", ReviewAuthorityV1::Human)
         .unwrap();
@@ -1943,6 +1949,36 @@ fn calibration_scenario(directory: &std::path::Path, store: WorkspaceStore) {
             rusqlite::params![evaluator_release_id, first_policy_id],
         )
         .unwrap();
+    assert!(
+        control
+            .execute(
+                "UPDATE calibration_reports SET report_json = report_json",
+                [],
+            )
+            .is_err(),
+        "calibration reports must remain append-only"
+    );
+    assert!(
+        control
+            .execute("DELETE FROM calibration_reports", [])
+            .is_err(),
+        "calibration reports must reject deletion"
+    );
+    assert!(
+        control
+            .execute(
+                "UPDATE threshold_policy_activations SET activation_json = activation_json",
+                [],
+            )
+            .is_err(),
+        "threshold activation events must remain append-only"
+    );
+    assert!(
+        control
+            .execute("DELETE FROM threshold_policy_activations", [])
+            .is_err(),
+        "threshold activation events must reject deletion"
+    );
     drop(control);
     let target_assessment = export.items[0].assessment.as_ref().unwrap();
     let assessment_before = serde_json::to_vec(target_assessment).unwrap();
