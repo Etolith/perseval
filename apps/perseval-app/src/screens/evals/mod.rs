@@ -266,21 +266,29 @@ impl EvalReviewScreen {
             .child(
                 button("Quality checks", self.view == EvalsView::Studio)
                     .id("evals-quality-checks")
+                    .role(Role::Button)
+                    .aria_label("Open executable quality checks")
                     .on_click(cx.listener(|this, _, _, cx| this.open_quality_checks(cx))),
             )
             .child(
                 button("Review Queue", self.view == EvalsView::HumanReview)
                     .id("evals-human-review")
+                    .role(Role::Button)
+                    .aria_label("Open human review queue")
                     .on_click(cx.listener(|this, _, _, cx| this.open_human_reviews(cx))),
             )
             .child(
                 button("Calibration", self.view == EvalsView::Calibration)
                     .id("evals-calibration")
+                    .role(Role::Button)
+                    .aria_label("Open evaluator calibration and automation safety")
                     .on_click(cx.listener(|this, _, _, cx| this.open_calibration(cx))),
             )
             .child(
                 button("Eval drafts", self.view == EvalsView::EvalDrafts)
                     .id("evals-drafts")
+                    .role(Role::Button)
+                    .aria_label("Open deterministic evaluation drafts")
                     .on_click(cx.listener(|this, _, _, cx| this.open_queue(cx))),
             )
     }
