@@ -11,6 +11,124 @@ use traces_to_evals::{
 };
 
 impl WorkspaceStore {
+    pub fn agent_context_release(
+        &self,
+        project_id: &str,
+        context_release_id: &str,
+    ) -> Result<Option<AgentContextReleaseV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT release_json FROM agent_context_releases
+                 WHERE project_id = ?1 AND context_release_id = ?2",
+                params![project_id, context_release_id],
+                |row| {
+                    let release_json: String = row.get(0)?;
+                    serde_json::from_str(&release_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            release_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn trace_context_binding(
+        &self,
+        project_id: &str,
+        binding_id: &str,
+    ) -> Result<Option<TraceContextBindingV1>, StoreError> {
+        validate_project_scope(project_id)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        control
+            .query_row(
+                "SELECT binding_json FROM trace_context_bindings
+                 WHERE project_id = ?1 AND binding_id = ?2",
+                params![project_id, binding_id],
+                |row| {
+                    let binding_json: String = row.get(0)?;
+                    serde_json::from_str(&binding_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            binding_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Returns the newest exact binding, materializing a durable unresolved
+    /// binding when no reviewed rule resolved the finalized revision.
+    pub fn ensure_trace_context_binding(
+        &self,
+        project_id: &str,
+        logical_trace_id: &str,
+        revision: u64,
+    ) -> Result<(ContextBindingRecordV1, TraceContextBindingV1), StoreError> {
+        validate_project_scope(project_id)?;
+        let now = now_unix_ms();
+        let mut control = self.control.lock().expect("control store lock poisoned");
+        let transaction = control.transaction()?;
+        let allowed = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM logical_traces t JOIN trace_revisions r
+                  ON r.logical_trace_id = t.logical_trace_id AND r.revision = ?4
+                WHERE t.workspace_id = ?1 AND t.project_id = ?2
+                  AND t.logical_trace_id = ?3 AND r.lifecycle = 'finalized'
+             )",
+            params![
+                self.workspace_id,
+                project_id,
+                logical_trace_id,
+                revision as i64
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !allowed {
+            return Err(StoreError::Invalid(
+                "trace context binding target is cross-project, missing, or not finalized".into(),
+            ));
+        }
+        let binding_ref = super::assessments::latest_or_unresolved_binding(
+            &transaction,
+            project_id,
+            logical_trace_id,
+            revision,
+            now,
+        )?;
+        let (binding_rule_release_id, binding_json, created_at_unix_ms): (String, String, i64) =
+            transaction.query_row(
+                "SELECT binding_rule_release_id, binding_json, created_at_unix_ms
+             FROM trace_context_bindings WHERE binding_id = ?1",
+                params![&binding_ref.binding_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let binding: TraceContextBindingV1 = serde_json::from_str(&binding_json)?;
+        transaction.commit()?;
+        Ok((
+            ContextBindingRecordV1 {
+                binding_id: binding_ref.binding_id,
+                project_id: project_id.into(),
+                logical_trace_id: logical_trace_id.into(),
+                revision,
+                status: binding_ref.status,
+                context_release_id: binding_ref.context_release_id,
+                binding_rule_release_id,
+                binding_json,
+                created_at_unix_ms,
+            },
+            binding,
+        ))
+    }
+
     pub fn latest_agent_context_release(
         &self,
         project_id: &str,

@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::analyzer::{CohortControlHandle, spawn_analysis_worker};
-use crate::assessments::{FoundationAssessmentExecutor, spawn_assessment_worker};
+use crate::assessments::{TaskCompletionAssessmentExecutor, spawn_assessment_worker};
 use crate::config::PersevalConfigV1;
 use crate::jobs::spawn_candidate_job_worker;
 use crate::topology::spawn_topology_worker;
@@ -34,6 +34,8 @@ mod product;
 mod writer;
 
 use writer::writer_loop;
+
+pub use assessments::TaskCompletionQualityCheckDraftV1;
 
 #[derive(Debug, Clone)]
 pub struct TraceSnapshot {
@@ -114,6 +116,8 @@ pub enum LiveServiceError {
     PolicyDenied(String),
     #[error("trace file import failed: {0}")]
     InvalidImport(String),
+    #[error("invalid request: {0}")]
+    InvalidInput(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -609,10 +613,12 @@ impl LiveTraceService {
             analysis_shutdown.clone(),
         )
         .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
+        let assessment_executor = TaskCompletionAssessmentExecutor::openai(store.clone())
+            .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         let assessment_worker = spawn_assessment_worker(
             store.clone(),
             config.assessments.clone(),
-            Arc::new(FoundationAssessmentExecutor),
+            Arc::new(assessment_executor),
             analysis_shutdown.clone(),
         )
         .map_err(|error| LiveServiceError::Writer(error.to_string()))?;

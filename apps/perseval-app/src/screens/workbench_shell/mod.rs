@@ -430,7 +430,9 @@ impl WorkbenchShell {
             compare::CompareEvent::OpenRuns => this.open_activity(ActivityId::Runs, cx),
         })
         .detach();
-        let eval_review = cx.new(|cx| evals::EvalReviewScreen::new(service.clone(), None, cx));
+        let eval_reviewer_ref = config.reviewer_ref.clone();
+        let eval_review =
+            cx.new(|cx| evals::EvalReviewScreen::new(service.clone(), None, eval_reviewer_ref, cx));
         cx.subscribe(&eval_review, |this, _, event, cx| match event {
             evals::EvalReviewEvent::Candidate {
                 project_id,
@@ -987,6 +989,9 @@ fn sync_editor_resource(
                     cx,
                 )
             });
+        }
+        Some(EditorResource::EvaluatorStudio) => {
+            eval_review.update(cx, |evals, cx| evals.show_studio(cx));
         }
         Some(EditorResource::EvalQueue) => {
             eval_review.update(cx, |evals, cx| evals.show_queue(cx));

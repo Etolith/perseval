@@ -947,14 +947,21 @@ impl FailureInbox {
                     .unwrap_or_else(|| "not reported".into());
                 let confidence = evaluation
                     .and_then(|evaluation| evaluation.model_reported_confidence)
-                    .map(|confidence| format!("{confidence:.3} (model-reported)"))
+                    .map(|confidence| format!("{confidence:.3}"))
                     .unwrap_or_else(|| "not reported".into());
+                // Calibration is a separate immutable decision introduced by PV-03.
+                // Never present raw model confidence as a calibrated probability.
+                let calibrated_probability = "not calibrated";
+                let projection_policy = assessment
+                    .projection_policy
+                    .map(review_projection_policy_label)
+                    .unwrap_or("not recorded");
                 let abstention = evaluation
                     .and_then(|evaluation| evaluation.abstention_reason)
                     .map(|reason| format!(" · {}", review_abstention_label(reason)))
                     .unwrap_or_default();
                 let card_label = format!(
-                    "Automated review {verdict}{abstention}. {explanation}. Score {score}. Confidence {confidence}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}.",
+                    "Automated review {verdict}{abstention}. {explanation}. Raw judge score {score}. Model-reported confidence {confidence}. Calibrated failure probability {calibrated_probability}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}. Projection policy {projection_policy}.",
                     assessment.cost_micros as f64 / 1_000_000.0,
                     assessment.latency_ms,
                     short_review_identity(&assessment.evaluator_release_id),
@@ -992,7 +999,7 @@ impl FailureInbox {
                             .text_xs()
                             .text_color(Theme::DIM)
                             .child(format!(
-                                "Score {score} · confidence {confidence}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProvider {} · requested {} · returned {}",
+                                "Raw judge score {score}\nModel-reported confidence {confidence}\nCalibrated failure probability {calibrated_probability}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProjection release {}\nContext projection release {}\nProjection policy {projection_policy}\nApplicability taxonomy {}\nProvider {} · requested {} · returned {}",
                                 assessment.cost_micros as f64 / 1_000_000.0,
                                 assessment.latency_ms,
                                 short_review_identity(&assessment.evaluator_release_id),
@@ -1003,6 +1010,21 @@ impl FailureInbox {
                                     .unwrap_or("unresolved"),
                                 short_review_identity(&assessment.context_binding_id),
                                 short_review_identity(&assessment.projection_hash),
+                                assessment
+                                    .projection_release_id
+                                    .as_deref()
+                                    .map(short_review_identity)
+                                    .unwrap_or("not recorded"),
+                                assessment
+                                    .context_projection_release_id
+                                    .as_deref()
+                                    .map(short_review_identity)
+                                    .unwrap_or("not recorded"),
+                                assessment
+                                    .taxonomy_release_id
+                                    .as_deref()
+                                    .map(short_review_identity)
+                                    .unwrap_or("global"),
                                 assessment.provider.as_deref().unwrap_or("no provider call"),
                                 assessment.requested_model.as_deref().unwrap_or("none"),
                                 assessment.returned_model.as_deref().unwrap_or("none")
@@ -1380,6 +1402,16 @@ fn missing_telemetry_summary(span: Option<&SpanRow>, trace_spans: &[SpanRow]) ->
 
 fn short_review_identity(value: &str) -> &str {
     value.get(..value.len().min(18)).unwrap_or(value)
+}
+
+fn review_projection_policy_label(
+    policy: perseval_service::analysis::TaskCompletionContentPolicyV1,
+) -> &'static str {
+    use perseval_service::analysis::TaskCompletionContentPolicyV1::*;
+    match policy {
+        StructuredOnly => "structural only",
+        PreRedactedSummaries => "hosted pre-redacted summaries",
+    }
 }
 
 fn review_verdict_label(verdict: perseval_service::analysis::LearnedVerdictV1) -> &'static str {

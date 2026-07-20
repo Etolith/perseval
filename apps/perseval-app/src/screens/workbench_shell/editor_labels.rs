@@ -81,6 +81,7 @@ pub(super) fn tab_title(resource: &EditorResource) -> String {
         EditorResource::FullTrace {
             logical_trace_id, ..
         } => format!("Trace · {}", short_id(logical_trace_id)),
+        EditorResource::EvaluatorStudio => "Quality Checks".into(),
         EditorResource::EvalQueue => "Eval Queue".into(),
         EditorResource::CompareSetup => "Compare".into(),
         other => match other.kind() {

@@ -3,12 +3,15 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use perseval_store::{
-    AgentContextDraftV1, AgentContextGovernanceSummaryV1, AssessmentJobExportV1, AssessmentJobV1,
-    AssessmentRecordV1, AssessmentRuntimeHealthV1, ContextBackfillPreviewV1,
-    ContextBackfillResultV1, ContextBindingRecordV1, ContextBindingRuleSetV1,
-    ProjectAssessmentPolicyV1, ReviewAuthorityV1, TaxonomyGovernanceSummaryV1,
+    AgentContextDraftV1, AgentContextGovernanceSummaryV1, AssessmentBackfillPreviewV1,
+    AssessmentJobExportV1, AssessmentJobV1, AssessmentRecordV1, AssessmentRuntimeHealthV1,
+    AssessmentSamplingPolicyV1, ContextBackfillPreviewV1, ContextBackfillResultV1,
+    ContextBindingRecordV1, ContextBindingRuleSetV1, ProjectAssessmentPolicyV1, ReviewAuthorityV1,
+    TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionQualityCheckV1,
+    TaskCompletionReleaseConfigV1, TaxonomyGovernanceSummaryV1,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,12 +20,164 @@ use traces_to_evals::{
     AgentArchitectureContextV1, AgentCapabilityV1, AgentContextReleaseV1, AgentEvaluationContextV1,
     AgentIdentityContextV1, AgentIntentContextV1, AgentPolicyContextV1, AgentTaxonomyReleaseV1,
     CapabilityEffectV1, CapabilityKindV1, ContextFieldMetadataV1, ContextFieldProvenanceV1,
-    ContextFieldV1, ContextReviewStateV1, ContextSensitivityV1, EvaluatorReleaseSpecV1,
-    IdempotencyClassV1, SuccessCriterionImportanceV1, SuccessCriterionV1, TaxonomyDimensionV1,
+    ContextFieldV1, ContextProjectionClassV1, ContextProjectionV1, ContextReviewStateV1,
+    ContextSensitivityV1, EvaluationImplementationV1, EvaluationInputBoundsV1,
+    EvaluationTargetKind, EvaluatorReleaseSpecV1, IdempotencyClassV1, LearnedTaskKind,
+    SuccessCriterionImportanceV1, SuccessCriterionV1, TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2,
+    TaskCompletionContentPolicyV1, TaskCompletionProjectorV1, TaxonomyDimensionV1,
     TaxonomyLineageOperationV1, TaxonomyNodeStateV1, TaxonomyNodeV1,
+    task_completion_judgment_response_schema,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCompletionQualityCheckDraftV1 {
+    pub name: String,
+    pub review_criteria: String,
+    pub requested_model: String,
+    pub context_release_id: String,
+    pub applicable_taxonomy_node_ids: BTreeSet<String>,
+    pub content_policy: TaskCompletionContentPolicyV1,
+    pub estimated_output_tokens_low: u64,
+    pub estimated_output_tokens_high: u64,
+    pub input_cost_micros_per_million_tokens: u64,
+    pub output_cost_micros_per_million_tokens: u64,
+    pub pricing_version: String,
+}
+
 impl LiveTraceService {
+    pub fn publish_task_completion_quality_check(
+        &self,
+        project_id: &str,
+        draft: &TaskCompletionQualityCheckDraftV1,
+        activated_by: &str,
+        authority: ReviewAuthorityV1,
+    ) -> Result<String, LiveServiceError> {
+        if draft.name.trim().is_empty()
+            || draft.review_criteria.trim().is_empty()
+            || draft.requested_model.trim().is_empty()
+            || draft.pricing_version.trim().is_empty()
+        {
+            return Err(LiveServiceError::InvalidInput(
+                "quality check name, review criteria, model, and pricing version are required"
+                    .into(),
+            ));
+        }
+        if draft.estimated_output_tokens_low == 0
+            || draft.estimated_output_tokens_high < draft.estimated_output_tokens_low
+        {
+            return Err(LiveServiceError::InvalidInput(
+                "estimated output token range is invalid".into(),
+            ));
+        }
+        let context = self
+            .store
+            .agent_context_release(project_id, &draft.context_release_id)?
+            .ok_or_else(|| {
+                LiveServiceError::InvalidInput(
+                    "the selected immutable agent specification is unavailable".into(),
+                )
+            })?;
+        let projection_class = match draft.content_policy {
+            TaskCompletionContentPolicyV1::StructuredOnly => {
+                ContextProjectionClassV1::StructuralOnly
+            }
+            TaskCompletionContentPolicyV1::PreRedactedSummaries => {
+                ContextProjectionClassV1::HostedPreRedacted
+            }
+        };
+        let included_field_ids = task_completion_context_field_ids(&context, projection_class);
+        let applicable_taxonomy_release_id = if draft.applicable_taxonomy_node_ids.is_empty() {
+            None
+        } else {
+            self.store
+                .taxonomy_governance_summary(project_id)?
+                .latest_release_id
+                .ok_or_else(|| {
+                    LiveServiceError::InvalidInput(
+                        "stable taxonomy applicability requires an active immutable taxonomy release"
+                            .into(),
+                    )
+                })?
+                .into()
+        };
+        let context_projection = ContextProjectionV1 {
+            context_release_id: draft.context_release_id.clone(),
+            projection_class,
+            projector_version: "perseval-context-projector-v1".into(),
+            redaction_version: "perseval-redaction-v1".into(),
+            included_field_ids,
+        };
+        let projector = TaskCompletionProjectorV1 {
+            content_policy: draft.content_policy,
+            max_tool_observations: 256,
+            max_summary_bytes: 4_096,
+        };
+        let evaluator = EvaluatorReleaseSpecV1 {
+            schema_version: traces_to_evals::EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
+            name: draft.name.trim().into(),
+            task_kind: LearnedTaskKind::TaskCompletion,
+            target_kind: EvaluationTargetKind::TraceRevision,
+            implementation: EvaluationImplementationV1::PromptJudge {
+                provider: "openai".into(),
+                requested_model: draft.requested_model.trim().into(),
+                system_prompt: TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2.into(),
+                rubric: draft.review_criteria.trim().into(),
+                response_schema: task_completion_judgment_response_schema(),
+                decoding_parameters: BTreeMap::new(),
+                parser_version: "task-completion-parser-v1".into(),
+                normalizer_version: "task-completion-normalizer-v1".into(),
+            },
+            projection_release_id: projector
+                .release_id()
+                .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?,
+            context_projection_release_id: context_projection
+                .release_id()
+                .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?,
+            applicable_taxonomy_release_id,
+            applicable_taxonomy_node_ids: draft.applicable_taxonomy_node_ids.clone(),
+            input_bounds: EvaluationInputBoundsV1 {
+                max_subjects: 1,
+                max_evidence_items: 512,
+                max_input_bytes: 256_000,
+                max_output_bytes: 16_000,
+            },
+            evidence_schema_version: "traceeval.evidence.v1".into(),
+            abstention_policy: serde_json::json!({
+                "unresolved_context": "abstain",
+                "ambiguous_context": "abstain",
+                "missing_success_criteria": "abstain",
+                "truncated_projection": "abstain",
+                "invalid_provider_output": "abstain"
+            }),
+            code_artifact_hash: content_hash("perseval-task-completion-quality-check-v1"),
+        };
+        let evaluator_release_id = evaluator
+            .release_id()
+            .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?;
+        let config = TaskCompletionReleaseConfigV1 {
+            schema_version: TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION.into(),
+            project_id: project_id.into(),
+            evaluator_release_id,
+            context_release_id: draft.context_release_id.clone(),
+            context_projection,
+            projector,
+            requested_model: draft.requested_model.trim().into(),
+            estimated_output_tokens_low: draft.estimated_output_tokens_low,
+            estimated_output_tokens_high: draft.estimated_output_tokens_high,
+            input_cost_micros_per_million_tokens: draft.input_cost_micros_per_million_tokens,
+            output_cost_micros_per_million_tokens: draft.output_cost_micros_per_million_tokens,
+            pricing_version: draft.pricing_version.trim().into(),
+            activated_by: activated_by.into(),
+            activated_at_unix_ms: unix_ms_now(),
+        };
+        self.activate_task_completion_evaluator_release(
+            project_id,
+            &evaluator,
+            &config,
+            activated_by,
+            authority,
+        )
+    }
     /// Prepare a bounded, local-only specification draft from a directory the
     /// user explicitly selected. The scanner reads documentation and package
     /// manifests only; it skips fixtures, benchmark outputs, credentials, and
@@ -650,6 +805,83 @@ impl LiveTraceService {
             .activate_evaluator_release(project_id, evaluator, activated_by, authority)?)
     }
 
+    pub fn activate_task_completion_evaluator_release(
+        &self,
+        project_id: &str,
+        evaluator: &EvaluatorReleaseSpecV1,
+        config: &TaskCompletionReleaseConfigV1,
+        activated_by: &str,
+        authority: ReviewAuthorityV1,
+    ) -> Result<String, LiveServiceError> {
+        Ok(self.store.activate_task_completion_evaluator_release(
+            project_id,
+            evaluator,
+            config,
+            activated_by,
+            authority,
+        )?)
+    }
+
+    pub fn preview_assessment_backfill(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+    ) -> Result<AssessmentBackfillPreviewV1, LiveServiceError> {
+        Ok(self.store.preview_assessment_backfill(
+            project_id,
+            evaluator_release_id,
+            exact_revisions,
+        )?)
+    }
+
+    pub fn set_assessment_sampling_policy(
+        &self,
+        policy: &AssessmentSamplingPolicyV1,
+        authority: ReviewAuthorityV1,
+    ) -> Result<(), LiveServiceError> {
+        Ok(self
+            .store
+            .set_assessment_sampling_policy(policy, authority)?)
+    }
+
+    pub fn assessment_sampling_policy(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+    ) -> Result<Option<AssessmentSamplingPolicyV1>, LiveServiceError> {
+        Ok(self
+            .store
+            .assessment_sampling_policy(project_id, evaluator_release_id)?)
+    }
+
+    pub fn list_task_completion_quality_checks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<TaskCompletionQualityCheckV1>, LiveServiceError> {
+        Ok(self.store.list_task_completion_quality_checks(project_id)?)
+    }
+
+    pub fn list_assessment_jobs(
+        &self,
+        project_id: &str,
+        evaluator_release_id: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<AssessmentJobV1>, LiveServiceError> {
+        Ok(self
+            .store
+            .list_assessment_jobs(project_id, evaluator_release_id, offset, limit)?)
+    }
+
+    pub fn assessment_job(
+        &self,
+        project_id: &str,
+        job_id: &str,
+    ) -> Result<Option<AssessmentJobV1>, LiveServiceError> {
+        Ok(self.store.assessment_job(project_id, job_id)?)
+    }
+
     pub fn set_project_assessment_policy(
         &self,
         policy: &ProjectAssessmentPolicyV1,
@@ -678,6 +910,23 @@ impl LiveTraceService {
             project_id,
             evaluator_release_id,
             exact_revisions,
+            idempotency_key,
+        )?)
+    }
+
+    pub fn enqueue_assessment_job_from_preview(
+        &self,
+        project_id: &str,
+        evaluator_release_id: &str,
+        exact_revisions: &[(String, u64)],
+        expected_selection_hash: &str,
+        idempotency_key: &str,
+    ) -> Result<AssessmentJobV1, LiveServiceError> {
+        Ok(self.store.enqueue_assessment_job_from_preview(
+            project_id,
+            evaluator_release_id,
+            exact_revisions,
+            expected_selection_hash,
             idempotency_key,
         )?)
     }
@@ -716,6 +965,67 @@ impl LiveTraceService {
             .store
             .assessment_runtime_health_for_project(project_id)?)
     }
+}
+
+fn task_completion_context_field_ids(
+    context: &AgentContextReleaseV1,
+    projection_class: ContextProjectionClassV1,
+) -> BTreeSet<String> {
+    let mut field_ids = BTreeSet::new();
+    let mut include = |metadata: &traces_to_evals::ContextFieldMetadataV1| {
+        let safe = match projection_class {
+            ContextProjectionClassV1::HostedPreRedacted => matches!(
+                metadata.sensitivity,
+                ContextSensitivityV1::Public | ContextSensitivityV1::HostedPreRedacted
+            ),
+            ContextProjectionClassV1::StructuralOnly | ContextProjectionClassV1::LocalContent => {
+                !matches!(
+                    metadata.sensitivity,
+                    ContextSensitivityV1::Secret
+                        | ContextSensitivityV1::Credential
+                        | ContextSensitivityV1::HiddenLabel
+                        | ContextSensitivityV1::ExpectedAnswer
+                        | ContextSensitivityV1::Unclassified
+                )
+            }
+        };
+        if safe {
+            field_ids.insert(metadata.field_id.clone());
+        }
+    };
+    include(&context.intent.purpose.metadata);
+    for field in context
+        .intent
+        .supported_tasks
+        .iter()
+        .chain(context.intent.explicit_non_goals.iter())
+        .chain(context.intent.refusal_requirements.iter())
+        .chain(context.intent.escalation_requirements.iter())
+        .chain(context.intent.acceptable_partial_completion.iter())
+        .chain(context.evaluation_context.required_evidence_types.iter())
+    {
+        include(&field.metadata);
+    }
+    for criterion in &context.intent.success_criteria {
+        include(&criterion.metadata);
+    }
+    for capability in &context.capabilities {
+        include(&capability.metadata);
+    }
+    field_ids
+}
+
+fn content_hash(value: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
+}
+
+fn unix_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 struct ContextSource {

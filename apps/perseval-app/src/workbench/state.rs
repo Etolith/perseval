@@ -77,6 +77,7 @@ pub enum EditorResource {
     },
     Runs,
     Sources,
+    EvaluatorStudio,
     EvalQueue,
     EvalReview {
         project_id: String,
@@ -98,6 +99,7 @@ impl EditorResource {
                 | Self::FailureInbox
                 | Self::Runs
                 | Self::Sources
+                | Self::EvaluatorStudio
                 | Self::EvalQueue
                 | Self::CompareSetup
                 | Self::Settings
@@ -112,7 +114,7 @@ impl EditorResource {
             Self::FullTrace { .. } => EditorKind::FullTrace,
             Self::Runs => EditorKind::Runs,
             Self::Sources => EditorKind::Sources,
-            Self::EvalQueue => EditorKind::EvalReview,
+            Self::EvaluatorStudio | Self::EvalQueue => EditorKind::EvalReview,
             Self::EvalReview { .. } => EditorKind::EvalReview,
             Self::CompareSetup => EditorKind::Compare,
             Self::Compare { .. } => EditorKind::Compare,
@@ -136,6 +138,7 @@ impl EditorResource {
             } => format!("full-trace:{project_id}:{logical_trace_id}:{revision}"),
             Self::Runs => "runs".into(),
             Self::Sources => "sources".into(),
+            Self::EvaluatorStudio => "evaluator-studio".into(),
             Self::EvalQueue => "eval-queue".into(),
             Self::EvalReview {
                 project_id,
