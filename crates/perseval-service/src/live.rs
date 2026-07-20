@@ -31,6 +31,7 @@ use traces_to_evals::{ClusterAssignment, ClusterModel, TraceAlignmentOptions, Tr
 mod assessments;
 mod local_import;
 mod product;
+mod reviews;
 mod writer;
 
 use writer::writer_loop;
@@ -118,6 +119,8 @@ pub enum LiveServiceError {
     InvalidImport(String),
     #[error("invalid request: {0}")]
     InvalidInput(String),
+    #[error("reviewer is not assigned to this task")]
+    ReviewNotAssigned,
 }
 
 #[derive(Debug, Clone, Default)]

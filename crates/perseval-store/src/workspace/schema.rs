@@ -879,8 +879,268 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
             updated_at_unix_ms INTEGER NOT NULL,
             PRIMARY KEY(project_id, evaluator_release_id)
          );
+         CREATE TABLE IF NOT EXISTS annotation_schema_releases(
+            annotation_schema_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_annotation_schemas_project
+            ON annotation_schema_releases(project_id, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS annotation_cases(
+            case_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            annotation_schema_release_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            context_binding_id TEXT NOT NULL,
+            safe_projection_hash TEXT NOT NULL,
+            leakage_group_id TEXT NOT NULL,
+            case_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(annotation_schema_release_id, target_id, safe_projection_hash)
+         );
+         CREATE INDEX IF NOT EXISTS idx_annotation_cases_project
+            ON annotation_cases(project_id, logical_trace_id, revision);
+         CREATE TABLE IF NOT EXISTS annotation_case_evidence(
+            case_id TEXT NOT NULL,
+            evidence_key TEXT NOT NULL,
+            span_id TEXT NOT NULL,
+            PRIMARY KEY(case_id, evidence_key),
+            UNIQUE(case_id, span_id)
+         );
+         CREATE TABLE IF NOT EXISTS review_split_releases(
+            split_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            annotation_schema_release_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS review_split_groups(
+            split_release_id TEXT NOT NULL,
+            leakage_group_id TEXT NOT NULL,
+            split TEXT NOT NULL,
+            PRIMARY KEY(split_release_id, leakage_group_id)
+         );
+         CREATE TABLE IF NOT EXISTS review_queues(
+            queue_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            annotation_schema_release_id TEXT NOT NULL,
+            split_release_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            queue_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_review_queues_project
+            ON review_queues(project_id, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS review_tasks(
+            task_id TEXT PRIMARY KEY,
+            queue_id TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            assessment_id TEXT NOT NULL,
+            leakage_group_id TEXT NOT NULL,
+            split TEXT NOT NULL,
+            status TEXT NOT NULL,
+            task_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(queue_id, case_id),
+            UNIQUE(case_id, assessment_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_review_tasks_queue
+            ON review_tasks(queue_id, status, created_at_unix_ms);
+         CREATE TABLE IF NOT EXISTS review_assignments(
+            task_id TEXT NOT NULL,
+            reviewer_id TEXT NOT NULL,
+            reviewer_ordinal INTEGER NOT NULL,
+            assigned_at_unix_ms INTEGER NOT NULL,
+            submitted_annotation_revision_id TEXT,
+            PRIMARY KEY(task_id, reviewer_id),
+            UNIQUE(task_id, reviewer_ordinal)
+         );
+         CREATE TABLE IF NOT EXISTS annotations(
+            annotation_id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            annotation_schema_release_id TEXT NOT NULL,
+            reviewer_id TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(case_id, annotation_schema_release_id, reviewer_id)
+         );
+         CREATE TABLE IF NOT EXISTS annotation_revisions(
+            revision_id TEXT PRIMARY KEY,
+            annotation_id TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            source_task_id TEXT NOT NULL,
+            reviewer_id TEXT NOT NULL,
+            annotation_revision INTEGER NOT NULL,
+            supersedes_revision_id TEXT,
+            label TEXT NOT NULL,
+            annotation_json TEXT NOT NULL,
+            submitted_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(annotation_id, annotation_revision)
+         );
+         CREATE INDEX IF NOT EXISTS idx_annotations_task
+            ON annotation_revisions(source_task_id, reviewer_id, annotation_revision DESC);
+         CREATE TABLE IF NOT EXISTS adjudication_revisions(
+            revision_id TEXT PRIMARY KEY,
+            adjudication_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            adjudication_revision INTEGER NOT NULL,
+            supersedes_revision_id TEXT,
+            adjudication_json TEXT NOT NULL,
+            adjudicated_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(adjudication_id, adjudication_revision)
+         );
+         CREATE TABLE IF NOT EXISTS adjudication_inputs(
+            adjudication_revision_id TEXT NOT NULL,
+            annotation_revision_id TEXT NOT NULL,
+            PRIMARY KEY(adjudication_revision_id, annotation_revision_id)
+         );
+         CREATE TABLE IF NOT EXISTS calibration_releases(
+            calibration_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            annotation_schema_release_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_calibration_releases_project
+            ON calibration_releases(project_id, evaluator_release_id, created_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS calibration_release_members(
+            calibration_release_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            assessment_id TEXT NOT NULL,
+            leakage_group_id TEXT NOT NULL,
+            split TEXT NOT NULL,
+            member_role TEXT NOT NULL,
+            member_json TEXT NOT NULL,
+            PRIMARY KEY(calibration_release_id, task_id)
+         );
+         CREATE TABLE IF NOT EXISTS calibration_reports(
+            report_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            calibration_release_id TEXT NOT NULL,
+            threshold_policy_release_id TEXT NOT NULL,
+            split_release_id TEXT NOT NULL,
+            split TEXT NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_calibration_report_once
+            ON calibration_reports(calibration_release_id, split);
+         CREATE TABLE IF NOT EXISTS threshold_policy_releases(
+            threshold_policy_release_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            calibration_release_id TEXT NOT NULL,
+            release_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_threshold_policies_project
+            ON threshold_policy_releases(project_id, evaluator_release_id, created_at_unix_ms DESC);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_threshold_policy_calibration_once
+            ON threshold_policy_releases(calibration_release_id);
+         CREATE TABLE IF NOT EXISTS threshold_policy_activations(
+            activation_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            evaluator_release_id TEXT NOT NULL,
+            threshold_policy_release_id TEXT NOT NULL,
+            activation_json TEXT NOT NULL,
+            activated_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_threshold_activations_project
+            ON threshold_policy_activations(project_id, evaluator_release_id, activated_at_unix_ms DESC);
+         CREATE TABLE IF NOT EXISTS assessment_decisions(
+            decision_id TEXT PRIMARY KEY,
+            assessment_id TEXT NOT NULL,
+            calibration_release_id TEXT NOT NULL,
+            threshold_policy_release_id TEXT NOT NULL,
+            decision_json TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL,
+            UNIQUE(assessment_id, calibration_release_id, threshold_policy_release_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_assessment_decisions_assessment
+            ON assessment_decisions(assessment_id, created_at_unix_ms DESC);
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_schema_release_update
+            BEFORE UPDATE ON annotation_schema_releases BEGIN
+               SELECT RAISE(ABORT, 'annotation schema releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_schema_release_delete
+            BEFORE DELETE ON annotation_schema_releases BEGIN
+               SELECT RAISE(ABORT, 'annotation schema releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_revision_update
+            BEFORE UPDATE ON annotation_revisions BEGIN
+               SELECT RAISE(ABORT, 'annotation revisions are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_revision_delete
+            BEFORE DELETE ON annotation_revisions BEGIN
+               SELECT RAISE(ABORT, 'annotation revisions are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_case_evidence_update
+            BEFORE UPDATE ON annotation_case_evidence BEGIN
+               SELECT RAISE(ABORT, 'annotation case evidence is immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_annotation_case_evidence_delete
+            BEFORE DELETE ON annotation_case_evidence BEGIN
+               SELECT RAISE(ABORT, 'annotation case evidence is immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_adjudication_revision_update
+            BEFORE UPDATE ON adjudication_revisions BEGIN
+               SELECT RAISE(ABORT, 'adjudication revisions are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_adjudication_revision_delete
+            BEFORE DELETE ON adjudication_revisions BEGIN
+               SELECT RAISE(ABORT, 'adjudication revisions are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_release_update
+            BEFORE UPDATE ON calibration_releases BEGIN
+               SELECT RAISE(ABORT, 'calibration releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_release_delete
+            BEFORE DELETE ON calibration_releases BEGIN
+               SELECT RAISE(ABORT, 'calibration releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_report_update
+            BEFORE UPDATE ON calibration_reports BEGIN
+               SELECT RAISE(ABORT, 'calibration reports are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_calibration_report_delete
+            BEFORE DELETE ON calibration_reports BEGIN
+               SELECT RAISE(ABORT, 'calibration reports are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_release_update
+            BEFORE UPDATE ON threshold_policy_releases BEGIN
+               SELECT RAISE(ABORT, 'threshold policy releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_release_delete
+            BEFORE DELETE ON threshold_policy_releases BEGIN
+               SELECT RAISE(ABORT, 'threshold policy releases are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_activation_update
+            BEFORE UPDATE ON threshold_policy_activations BEGIN
+               SELECT RAISE(ABORT, 'threshold policy activations are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_threshold_policy_activation_delete
+            BEFORE DELETE ON threshold_policy_activations BEGIN
+               SELECT RAISE(ABORT, 'threshold policy activations are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_assessment_decision_update
+            BEFORE UPDATE ON assessment_decisions BEGIN
+               SELECT RAISE(ABORT, 'assessment decisions are immutable');
+            END;
+         CREATE TRIGGER IF NOT EXISTS immutable_assessment_decision_delete
+            BEFORE DELETE ON assessment_decisions BEGIN
+               SELECT RAISE(ABORT, 'assessment decisions are immutable');
+            END;
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (18);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (19);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (19);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (20);",
     )?;
     ensure_control_column(
         connection,

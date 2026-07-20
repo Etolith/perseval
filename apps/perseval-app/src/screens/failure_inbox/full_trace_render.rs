@@ -29,11 +29,20 @@ impl FailureInbox {
                 )
             })
             .unwrap_or_else(|| "Failures / Full trace".into());
-        let evidence_ids = self
+        let mut evidence_ids = self
             .evidence
             .as_ref()
             .map(|evidence| evidence.evidence_span_ids.clone())
             .unwrap_or_default();
+        let focused_review_evidence = self
+            .focused_review_evidence
+            .as_ref()
+            .filter(|(span_id, _)| self.focused_span_id.as_deref() == Some(span_id.as_str()));
+        if let Some((span_id, _)) = focused_review_evidence
+            && !evidence_ids.contains(span_id)
+        {
+            evidence_ids.push(span_id.clone());
+        }
         let evidence_count = evidence_ids.len();
         let search = self.full_trace_search.read(cx).text().trim().to_lowercase();
         let filter_active = !search.is_empty() || self.full_trace_errors_only;
@@ -259,10 +268,17 @@ impl FailureInbox {
             } else {
                 format!(" · {loaded_span_count} rows loaded")
             };
-            format!(
-                "{} total spans{filtered} · {} evidence spans highlighted",
-                self.full_trace_span_count, evidence_count
-            )
+            if let Some((_, label)) = focused_review_evidence {
+                format!(
+                    "{} total spans{filtered} · automated review evidence highlighted: {label}",
+                    self.full_trace_span_count
+                )
+            } else {
+                format!(
+                    "{} total spans{filtered} · {} evidence spans highlighted",
+                    self.full_trace_span_count, evidence_count
+                )
+            }
         };
         let content = if self.full_trace_loading {
             div()

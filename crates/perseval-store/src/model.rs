@@ -1042,6 +1042,19 @@ pub const ASSESSMENT_BACKFILL_PREVIEW_SCHEMA_VERSION: &str =
     "perseval.assessment_backfill_preview.v1";
 pub const ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION: &str =
     "perseval.assessment_sampling_policy.v1";
+pub const ANNOTATION_SCHEMA_RELEASE_SCHEMA_VERSION: &str = "perseval.annotation_schema_release.v1";
+pub const ANNOTATION_CASE_SCHEMA_VERSION: &str = "perseval.annotation_case.v1";
+pub const REVIEW_SPLIT_RELEASE_SCHEMA_VERSION: &str = "perseval.review_split_release.v1";
+pub const REVIEW_QUEUE_SCHEMA_VERSION: &str = "perseval.review_queue.v1";
+pub const REVIEW_TASK_SCHEMA_VERSION: &str = "perseval.review_task.v1";
+pub const ANNOTATION_REVISION_SCHEMA_VERSION: &str = "perseval.annotation_revision.v1";
+pub const ADJUDICATION_SCHEMA_VERSION: &str = "perseval.adjudication.v1";
+pub const CALIBRATION_RELEASE_SCHEMA_VERSION: &str = "perseval.calibration_release.v1";
+pub const CALIBRATION_REPORT_SCHEMA_VERSION: &str = "perseval.calibration_report.v1";
+pub const THRESHOLD_POLICY_RELEASE_SCHEMA_VERSION: &str = "perseval.threshold_policy_release.v1";
+pub const THRESHOLD_POLICY_ACTIVATION_SCHEMA_VERSION: &str =
+    "perseval.threshold_policy_activation.v1";
+pub const ASSESSMENT_DECISION_SCHEMA_VERSION: &str = "perseval.assessment_decision.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1465,6 +1478,330 @@ pub struct AssessmentRuntimeHealthV1 {
     pub total_cost_micros: u64,
     pub total_latency_ms: u64,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationLabelV1 {
+    Completed,
+    Partial,
+    Failed,
+    Abstain,
+}
+
+impl AnnotationLabelV1 {
+    pub const fn is_failure(self) -> Option<bool> {
+        match self {
+            Self::Completed => Some(false),
+            Self::Partial | Self::Failed => Some(true),
+            Self::Abstain => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewModeV1 {
+    BlindCalibration,
+    VisibleTriage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSelectionReasonV1 {
+    RandomAudit,
+    ActiveLearning,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTaskStatusV1 {
+    Pending,
+    InReview,
+    AwaitingAdjudication,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationSchemaReleaseV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub task_kind: traces_to_evals::LearnedTaskKind,
+    pub positive_class: String,
+    pub labels: Vec<AnnotationLabelV1>,
+    pub instructions: String,
+    pub required_reviewers: u32,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationCaseV1 {
+    pub schema_version: String,
+    pub case_id: String,
+    pub project_id: String,
+    pub annotation_schema_release_id: String,
+    pub target_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub context_binding_id: String,
+    pub safe_projection_hash: String,
+    pub leakage_group_id: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewSplitReleaseV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub annotation_schema_release_id: String,
+    pub group_assignments:
+        std::collections::BTreeMap<String, traces_to_evals::CalibrationDataSplitV1>,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewQueueV1 {
+    pub schema_version: String,
+    pub queue_id: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub annotation_schema_release_id: String,
+    pub split_release_id: String,
+    pub mode: ReviewModeV1,
+    pub random_audit_basis_points: u32,
+    pub active: bool,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewTaskV1 {
+    pub schema_version: String,
+    pub task_id: String,
+    pub queue_id: String,
+    pub case_id: String,
+    pub project_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub assessment_id: String,
+    pub leakage_group_id: String,
+    pub split: traces_to_evals::CalibrationDataSplitV1,
+    pub selection_reason: ReviewSelectionReasonV1,
+    pub required_reviewers: u32,
+    pub status: ReviewTaskStatusV1,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewAssignmentV1 {
+    pub task_id: String,
+    pub reviewer_id: String,
+    pub assigned_at_unix_ms: i64,
+    pub submitted_annotation_revision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationRevisionV1 {
+    pub schema_version: String,
+    pub annotation_id: String,
+    pub revision_id: String,
+    pub case_id: String,
+    pub annotation_schema_release_id: String,
+    pub source_task_id: String,
+    pub reviewer_id: String,
+    pub annotation_revision: u64,
+    pub supersedes_revision_id: Option<String>,
+    pub label: AnnotationLabelV1,
+    pub explanation: String,
+    pub evidence_keys: Vec<String>,
+    pub submitted_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlindReviewTaskViewV1 {
+    pub task: ReviewTaskV1,
+    pub assignment: ReviewAssignmentV1,
+    pub annotation_schema: AnnotationSchemaReleaseV1,
+    /// Evidence identities from the frozen safe projection. These are trace
+    /// locations the reviewer may cite, not citations selected by the judge.
+    pub evidence_keys: Vec<String>,
+    pub latest_annotation: Option<AnnotationRevisionV1>,
+    pub submitted_review_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevealedReviewTaskViewV1 {
+    pub task: ReviewTaskV1,
+    pub assignment: ReviewAssignmentV1,
+    pub annotation_schema: AnnotationSchemaReleaseV1,
+    pub evidence_keys: Vec<String>,
+    pub latest_annotation: Option<AnnotationRevisionV1>,
+    pub assessment: AssessmentRecordV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "visibility", rename_all = "snake_case")]
+pub enum ReviewTaskPresentationV1 {
+    Blind(Box<BlindReviewTaskViewV1>),
+    Revealed(Box<RevealedReviewTaskViewV1>),
+}
+
+/// A sealed disagreement packet for a third human. It includes the two exact
+/// current human answers and permissible trace evidence, but never the learned
+/// evaluator output being calibrated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewAdjudicationPacketV1 {
+    pub task: ReviewTaskV1,
+    pub annotation_schema: AnnotationSchemaReleaseV1,
+    pub annotation_revisions: Vec<AnnotationRevisionV1>,
+    pub evidence_keys: Vec<String>,
+    pub latest_adjudication: Option<AdjudicationV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "visibility", rename_all = "snake_case")]
+pub enum AssessmentPresentationV1 {
+    Visible {
+        assessment: Box<AssessmentRecordV1>,
+    },
+    WithheldBlindReview {
+        assessment_id: String,
+        task_id: String,
+        queue_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdjudicationV1 {
+    pub schema_version: String,
+    pub adjudication_id: String,
+    pub revision_id: String,
+    pub adjudication_revision: u64,
+    pub supersedes_revision_id: Option<String>,
+    pub task_id: String,
+    pub annotation_revision_ids: Vec<String>,
+    pub label: AnnotationLabelV1,
+    pub explanation: String,
+    pub evidence_keys: Vec<String>,
+    pub adjudicated_by: String,
+    pub adjudicated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationReleaseV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub annotation_schema_release_id: String,
+    pub split_release_id: String,
+    pub review_selection_hash: String,
+    pub agreement_report: traces_to_evals::HumanAgreementReportV1,
+    pub ordinal_agreement_report: Option<traces_to_evals::HumanAgreementReportV1>,
+    pub model: traces_to_evals::BinaryCalibrationModelV1,
+    pub fit_report: traces_to_evals::BinaryCalibrationReportV1,
+    #[serde(default)]
+    pub fit_slice_reports: Vec<CalibrationSliceReportV1>,
+    pub fit_annotation_revision_ids: Vec<String>,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationMemberV1 {
+    pub task_id: String,
+    pub assessment_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub leakage_group_id: String,
+    pub selection_reason: ReviewSelectionReasonV1,
+    pub split: traces_to_evals::CalibrationDataSplitV1,
+    pub annotation_revision_ids: Vec<String>,
+    pub adjudication_revision_id: Option<String>,
+    pub label: AnnotationLabelV1,
+    pub features: Option<traces_to_evals::LearnedCalibrationFeaturesV1>,
+    pub calibrated_failure_probability: Option<f64>,
+    /// Reproducible, allowlisted dimensions read from this exact trace
+    /// revision. Missing values are represented explicitly rather than
+    /// dropping the case from slice denominators.
+    #[serde(default)]
+    pub slice_values: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationSliceReportV1 {
+    pub dimension: String,
+    pub value: String,
+    pub report: traces_to_evals::BinaryCalibrationReportV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationReportV1 {
+    pub schema_version: String,
+    pub report_id: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub calibration_release_id: String,
+    /// Threshold policy frozen before this one-shot held-out evaluation.
+    pub threshold_policy_release_id: String,
+    pub split_release_id: String,
+    pub split: traces_to_evals::CalibrationDataSplitV1,
+    pub report: traces_to_evals::BinaryCalibrationReportV1,
+    #[serde(default)]
+    pub slice_reports: Vec<CalibrationSliceReportV1>,
+    pub annotation_revision_ids: Vec<String>,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdPolicyReleaseV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub calibration_release_id: String,
+    pub positive_class: String,
+    pub pass_probability_threshold: f64,
+    pub fail_probability_threshold: f64,
+    pub minimum_decision_confidence: f64,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibratedDecisionV1 {
+    Pass,
+    Fail,
+    Review,
+    Abstain,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdPolicyActivationV1 {
+    pub schema_version: String,
+    pub activation_id: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub threshold_policy_release_id: String,
+    pub activated_by: String,
+    pub activated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssessmentDecisionV1 {
+    pub schema_version: String,
+    pub decision_id: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub assessment_id: String,
+    pub calibration_release_id: String,
+    pub threshold_policy_release_id: String,
+    pub calibrated_failure_probability: Option<f64>,
+    pub decision: CalibratedDecisionV1,
+    pub created_at_unix_ms: i64,
 }
 
 #[cfg(test)]

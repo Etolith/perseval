@@ -451,7 +451,22 @@ impl WorkbenchShell {
                 this.persist();
                 cx.notify();
             }
-            evals::EvalReviewEvent::Queue => this.open_activity(ActivityId::Evals, cx),
+            evals::EvalReviewEvent::QualityChecks => {
+                this.open_editor(EditorResource::EvaluatorStudio, false);
+                this.sync_failure_view(cx);
+            }
+            evals::EvalReviewEvent::EvalDrafts => {
+                this.open_editor(EditorResource::EvalQueue, false);
+                this.sync_failure_view(cx);
+            }
+            evals::EvalReviewEvent::HumanReviews => {
+                this.open_editor(EditorResource::HumanReviewQueue, false);
+                this.sync_failure_view(cx);
+            }
+            evals::EvalReviewEvent::Calibration => {
+                this.open_editor(EditorResource::Calibration, false);
+                this.sync_failure_view(cx);
+            }
             evals::EvalReviewEvent::SourceTrace {
                 project_id,
                 logical_trace_id,
@@ -992,6 +1007,12 @@ fn sync_editor_resource(
         }
         Some(EditorResource::EvaluatorStudio) => {
             eval_review.update(cx, |evals, cx| evals.show_studio(cx));
+        }
+        Some(EditorResource::HumanReviewQueue) => {
+            eval_review.update(cx, |evals, cx| evals.show_human_reviews(cx));
+        }
+        Some(EditorResource::Calibration) => {
+            eval_review.update(cx, |evals, cx| evals.show_calibration(cx));
         }
         Some(EditorResource::EvalQueue) => {
             eval_review.update(cx, |evals, cx| evals.show_queue(cx));

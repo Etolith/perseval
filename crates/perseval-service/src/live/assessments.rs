@@ -7,11 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use perseval_store::{
     AgentContextDraftV1, AgentContextGovernanceSummaryV1, AssessmentBackfillPreviewV1,
-    AssessmentJobExportV1, AssessmentJobV1, AssessmentRecordV1, AssessmentRuntimeHealthV1,
-    AssessmentSamplingPolicyV1, ContextBackfillPreviewV1, ContextBackfillResultV1,
-    ContextBindingRecordV1, ContextBindingRuleSetV1, ProjectAssessmentPolicyV1, ReviewAuthorityV1,
-    TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionQualityCheckV1,
-    TaskCompletionReleaseConfigV1, TaxonomyGovernanceSummaryV1,
+    AssessmentJobExportV1, AssessmentJobV1, AssessmentPresentationV1, AssessmentRecordV1,
+    AssessmentRuntimeHealthV1, AssessmentSamplingPolicyV1, ContextBackfillPreviewV1,
+    ContextBackfillResultV1, ContextBindingRecordV1, ContextBindingRuleSetV1,
+    ProjectAssessmentPolicyV1, ReviewAuthorityV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION,
+    TaskCompletionQualityCheckV1, TaskCompletionReleaseConfigV1, TaxonomyGovernanceSummaryV1,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -944,6 +944,19 @@ impl LiveTraceService {
         Ok(self
             .store
             .list_trace_assessments(project_id, logical_trace_id, revision)?)
+    }
+
+    pub fn list_trace_assessment_presentations(
+        &self,
+        project_id: &str,
+        logical_trace_id: &str,
+        revision: u64,
+    ) -> Result<Vec<AssessmentPresentationV1>, LiveServiceError> {
+        Ok(self.store.list_trace_assessment_presentations(
+            project_id,
+            logical_trace_id,
+            revision,
+        )?)
     }
 
     pub fn export_assessment_job(

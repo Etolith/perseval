@@ -5,11 +5,11 @@ use crate::model::{
     ASSESSMENT_BACKFILL_PREVIEW_SCHEMA_VERSION, ASSESSMENT_JOB_EXPORT_SCHEMA_VERSION,
     ASSESSMENT_JOB_SCHEMA_VERSION, ASSESSMENT_RECORD_SCHEMA_VERSION, AssessmentBackfillPreviewV1,
     AssessmentCommitV1, AssessmentItemStatusV1, AssessmentJobExportV1, AssessmentJobItemExportV1,
-    AssessmentJobStatusV1, AssessmentJobV1, AssessmentPreviewTargetV1, AssessmentRecordV1,
-    AssessmentRuntimeHealthV1, AssessmentSamplingPolicyV1, ClaimedAssessmentItemV1,
-    ContextBindingStatusV1, PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1,
-    ReviewAuthorityV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION, TaskCompletionQualityCheckV1,
-    TaskCompletionReleaseConfigV1,
+    AssessmentJobStatusV1, AssessmentJobV1, AssessmentPresentationV1, AssessmentPreviewTargetV1,
+    AssessmentRecordV1, AssessmentRuntimeHealthV1, AssessmentSamplingPolicyV1,
+    ClaimedAssessmentItemV1, ContextBindingStatusV1, PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION,
+    ProjectAssessmentPolicyV1, ReviewAuthorityV1, TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION,
+    TaskCompletionQualityCheckV1, TaskCompletionReleaseConfigV1,
 };
 use rusqlite::TransactionBehavior;
 use traces_to_evals::{
@@ -1734,6 +1734,25 @@ impl WorkspaceStore {
             item_status_name(commit.status),
             now,
         )?;
+        let active_threshold_policy_id = transaction
+            .query_row(
+                "SELECT threshold_policy_release_id
+                 FROM threshold_policy_activations
+                 WHERE project_id = ?1 AND evaluator_release_id = ?2
+                 ORDER BY activated_at_unix_ms DESC, activation_id DESC
+                 LIMIT 1",
+                params![claim.project_id, claim.evaluator_release_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(threshold_policy_release_id) = active_threshold_policy_id {
+            super::reviews::materialize_assessment_decision_in_transaction(
+                &transaction,
+                &record.assessment_id,
+                &threshold_policy_release_id,
+                now,
+            )?;
+        }
         transaction.commit()?;
         Ok(Some(record))
     }
@@ -1761,7 +1780,7 @@ impl WorkspaceStore {
         Ok(job)
     }
 
-    pub fn list_trace_assessments(
+    pub(super) fn load_trace_assessments_unchecked(
         &self,
         project_id: &str,
         logical_trace_id: &str,
@@ -1849,11 +1868,82 @@ impl WorkspaceStore {
             .map_err(StoreError::from)
     }
 
+    pub fn list_trace_assessment_presentations(
+        &self,
+        project_id: &str,
+        logical_trace_id: &str,
+        revision: u64,
+    ) -> Result<Vec<AssessmentPresentationV1>, StoreError> {
+        let records =
+            self.load_trace_assessments_unchecked(project_id, logical_trace_id, revision)?;
+        let control = self.control.lock().expect("control store lock poisoned");
+        records
+            .into_iter()
+            .map(|assessment| {
+                if let Some((task_id, queue_id)) =
+                    super::reviews::assessment_blind_embargo(&control, &assessment.assessment_id)?
+                {
+                    Ok(AssessmentPresentationV1::WithheldBlindReview {
+                        assessment_id: assessment.assessment_id,
+                        task_id,
+                        queue_id,
+                    })
+                } else {
+                    Ok(AssessmentPresentationV1::Visible {
+                        assessment: Box::new(assessment),
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub fn list_trace_assessments(
+        &self,
+        project_id: &str,
+        logical_trace_id: &str,
+        revision: u64,
+    ) -> Result<Vec<AssessmentRecordV1>, StoreError> {
+        self.list_trace_assessment_presentations(project_id, logical_trace_id, revision)?
+            .into_iter()
+            .map(|presentation| match presentation {
+                AssessmentPresentationV1::Visible { assessment } => Ok(*assessment),
+                AssessmentPresentationV1::WithheldBlindReview { .. } => Err(StoreError::Invalid(
+                    "assessment output is withheld while blind calibration is unresolved".into(),
+                )),
+            })
+            .collect()
+    }
+
     pub fn export_assessment_job(&self, job_id: &str) -> Result<AssessmentJobExportV1, StoreError> {
         let mut control = self.control.lock().expect("control store lock poisoned");
         let transaction = control.transaction()?;
         let job = load_job(&transaction, job_id)?
             .ok_or_else(|| StoreError::Invalid("assessment job not found".into()))?;
+        let assessment_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT a.assessment_id FROM assessment_job_items i
+                 JOIN assessments a ON a.item_id = i.item_id
+                 WHERE i.job_id = ?1 ORDER BY a.assessment_id",
+            )?;
+            statement
+                .query_map(params![job_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let embargoed = assessment_ids
+            .iter()
+            .try_fold(false, |embargoed, assessment_id| {
+                if embargoed {
+                    Ok(true)
+                } else {
+                    super::reviews::assessment_blind_embargo(&transaction, assessment_id)
+                        .map(|value| value.is_some())
+                }
+            })?;
+        if embargoed {
+            return Err(StoreError::Invalid(
+                "assessment export is withheld while blind calibration is unresolved".into(),
+            ));
+        }
         let release_metadata = load_assessment_release_metadata(
             &transaction,
             &job.project_id,

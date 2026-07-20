@@ -16,7 +16,7 @@ mod render_root;
 mod scope;
 mod selection;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,13 +28,13 @@ use gpui::{
 };
 use perseval_service::analysis::{FindingSeverity, RecoveryStatus};
 use perseval_service::{
-    AssessmentRecordV1, BlobPreviewV1, BlobRefV1, CandidateGenerationJobStatusV1,
-    CandidateGenerationJobV1, EvalBatchPreviewV1, EvalBatchSelectionSpecV1, EvalCandidatePreview,
-    FailureFiltersV1, FailureGroupDetail, FailureGroupSummary, FailureOccurrence,
-    FailureRecurrenceBucketV1, FailureRecurrenceSeriesV1, FindingDispositionStateV1,
-    FindingEvidence, LiveTraceService, QueryScopeCriteriaV1, QueryScopeV1, RunComparisonRequestV1,
-    SourceHealth, SpanRow, TraceChangeKind, TraceSnapshot, TraceSubscription,
-    UNASSIGNED_PROJECT_ID,
+    AssessmentDecisionV1, AssessmentPresentationV1, AssessmentRecordV1, BlobPreviewV1, BlobRefV1,
+    CandidateGenerationJobStatusV1, CandidateGenerationJobV1, EvalBatchPreviewV1,
+    EvalBatchSelectionSpecV1, EvalCandidatePreview, FailureFiltersV1, FailureGroupDetail,
+    FailureGroupSummary, FailureOccurrence, FailureRecurrenceBucketV1, FailureRecurrenceSeriesV1,
+    FindingDispositionStateV1, FindingEvidence, LiveTraceService, QueryScopeCriteriaV1,
+    QueryScopeV1, RunComparisonRequestV1, SourceHealth, SpanRow, TraceChangeKind, TraceSnapshot,
+    TraceSubscription, UNASSIGNED_PROJECT_ID,
 };
 
 use crate::components::{
@@ -164,6 +164,8 @@ pub(crate) struct FailureInbox {
     full_trace_identity: Option<(String, u64)>,
     full_trace_project_id: Option<String>,
     trace_assessments: Vec<AssessmentRecordV1>,
+    trace_assessment_decisions: BTreeMap<String, Vec<AssessmentDecisionV1>>,
+    withheld_assessment_count: usize,
     full_trace_origin: FullTraceOrigin,
     full_trace_span_count: u64,
     full_trace_loading: bool,
@@ -174,6 +176,7 @@ pub(crate) struct FailureInbox {
     full_trace_end_unix_nano: u64,
     focused_span_id: Option<String>,
     focused_span_snapshot: Option<SpanRow>,
+    focused_review_evidence: Option<(String, String)>,
     group_details_open: bool,
     investigation_actions_open: bool,
     finding_review_open: bool,
@@ -259,6 +262,8 @@ impl FailureInbox {
             full_trace_identity: None,
             full_trace_project_id: None,
             trace_assessments: Vec::new(),
+            trace_assessment_decisions: BTreeMap::new(),
+            withheld_assessment_count: 0,
             full_trace_origin: FullTraceOrigin::Runs,
             full_trace_span_count: 0,
             full_trace_loading: false,
@@ -269,6 +274,7 @@ impl FailureInbox {
             full_trace_end_unix_nano: 1,
             focused_span_id: None,
             focused_span_snapshot: None,
+            focused_review_evidence: None,
             group_details_open: false,
             investigation_actions_open: false,
             finding_review_open: false,
@@ -596,6 +602,7 @@ impl FailureInbox {
     }
 
     fn focus_evidence_span(&mut self, span_id: String, cx: &mut Context<Self>) {
+        self.focused_review_evidence = None;
         self.focused_span_snapshot = self.evidence.as_ref().and_then(|evidence| {
             evidence
                 .spans
@@ -611,6 +618,7 @@ impl FailureInbox {
 
     fn focus_full_trace_span(&mut self, span: SpanRow, cx: &mut Context<Self>) {
         let span_id = span.span_id.clone();
+        self.focused_review_evidence = None;
         self.focused_span_id = Some(span_id.clone());
         cx.emit(FailureInboxEvent::FullTraceSelectionChanged {
             span_id: span_id.clone(),
@@ -646,10 +654,16 @@ impl FailureInbox {
         .detach();
     }
 
-    fn focus_assessment_evidence_span(&mut self, span_id: String, cx: &mut Context<Self>) {
+    fn focus_assessment_evidence_span(
+        &mut self,
+        span_id: String,
+        evidence_label: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some((trace_id, revision)) = self.full_trace_identity.clone() else {
             return;
         };
+        self.focused_review_evidence = Some((span_id.clone(), evidence_label));
         self.focused_span_id = Some(span_id.clone());
         self.focused_span_snapshot = None;
         self.tab = InspectorTab::Span;
@@ -789,6 +803,7 @@ impl FailureInbox {
         selected_span_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.focused_review_evidence = None;
         match &origin {
             FullTraceOrigin::Runs => {
                 self.evidence = None;
@@ -854,6 +869,8 @@ impl FailureInbox {
         self.full_trace_identity = Some((trace_id.clone(), revision));
         self.full_trace_project_id = Some(project_id.clone());
         self.trace_assessments.clear();
+        self.trace_assessment_decisions.clear();
+        self.withheld_assessment_count = 0;
         self.full_trace_origin = origin;
         self.full_trace_span_count = 0;
         self.full_trace_loading = true;
@@ -867,13 +884,35 @@ impl FailureInbox {
             let first_page = service.span_tree_page(&trace_id, revision, None, 0, 500)?;
             let timeline = service.list_spans_timeline(&trace_id, revision, 0, 500, None, false)?;
             let run = service.get_run(&trace_id)?;
-            let assessments = service.list_trace_assessments(&project_id, &trace_id, revision)?;
+            let presentations =
+                service.list_trace_assessment_presentations(&project_id, &trace_id, revision)?;
+            let mut assessments = Vec::new();
+            let mut withheld_assessment_count = 0;
+            for presentation in presentations {
+                match presentation {
+                    AssessmentPresentationV1::Visible { assessment } => {
+                        assessments.push(*assessment);
+                    }
+                    AssessmentPresentationV1::WithheldBlindReview { .. } => {
+                        withheld_assessment_count += 1;
+                    }
+                }
+            }
+            let mut decisions = BTreeMap::new();
+            for assessment in &assessments {
+                decisions.insert(
+                    assessment.assessment_id.clone(),
+                    service.assessment_decisions(&assessment.assessment_id)?,
+                );
+            }
             Ok::<_, perseval_service::LiveServiceError>((
                 count,
                 first_page,
                 timeline,
                 run,
                 assessments,
+                decisions,
+                withheld_assessment_count,
             ))
         });
         cx.spawn(async move |weak, cx| {
@@ -884,7 +923,15 @@ impl FailureInbox {
                 }
                 this.full_trace_loading = false;
                 match result {
-                    Ok((count, first_page, timeline, run, assessments)) => {
+                    Ok((
+                        count,
+                        first_page,
+                        timeline,
+                        run,
+                        assessments,
+                        decisions,
+                        withheld_assessment_count,
+                    )) => {
                         this.full_trace_span_count = count;
                         this.full_trace_timeline.set_total(count);
                         this.full_trace_timeline.finish_load(0, timeline);
@@ -897,6 +944,8 @@ impl FailureInbox {
                                 .max(run.start_time_unix_nano.saturating_add(1));
                         }
                         this.trace_assessments = assessments;
+                        this.trace_assessment_decisions = decisions;
+                        this.withheld_assessment_count = withheld_assessment_count;
                     }
                     Err(error) => this.load_error = Some(error.to_string()),
                 }
