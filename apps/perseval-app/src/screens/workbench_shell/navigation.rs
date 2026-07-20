@@ -1,6 +1,14 @@
 use super::*;
 
 impl WorkbenchShell {
+    fn request_visible_repaint(window: &mut Window) {
+        window.on_next_frame(|window, cx| {
+            window.refresh();
+            cx.refresh_windows();
+        });
+        window.refresh();
+    }
+
     pub(super) fn open_activity(&mut self, activity: ActivityId, cx: &mut Context<Self>) {
         let resource = match activity {
             ActivityId::Failures => EditorResource::FailureInbox,
@@ -14,6 +22,21 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
+    }
+
+    pub(super) fn open_activity_in_window(
+        &mut self,
+        activity: ActivityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_activity(activity, cx);
+        Self::request_visible_repaint(window);
+    }
+
+    pub(super) fn request_navigation_repaint(window: &mut Window) {
+        Self::request_visible_repaint(window);
     }
 
     pub(super) fn activate_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
@@ -22,6 +45,7 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn close_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
@@ -40,12 +64,21 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn pin_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
         self.model.apply(WorkbenchAction::PinEditor(id));
         self.persist();
         cx.notify();
+        cx.refresh_windows();
+    }
+
+    pub(super) fn unpin_editor(&mut self, id: EditorId, cx: &mut Context<Self>) {
+        self.model.apply(WorkbenchAction::UnpinEditor(id));
+        self.persist();
+        cx.notify();
+        cx.refresh_windows();
     }
 
     pub(super) fn open_editor(&mut self, resource: EditorResource, pinned: bool) {
@@ -77,6 +110,7 @@ impl WorkbenchShell {
             self.sync_failure_view(cx);
             self.persist();
             cx.notify();
+            cx.refresh_windows();
         }
     }
 
@@ -87,6 +121,7 @@ impl WorkbenchShell {
             self.sync_failure_view(cx);
             self.persist();
             cx.notify();
+            cx.refresh_windows();
         }
     }
 
@@ -98,5 +133,34 @@ impl WorkbenchShell {
         self.sync_failure_view(cx);
         self.persist();
         cx.notify();
+        cx.refresh_windows();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div};
+
+    use super::WorkbenchShell;
+
+    struct RepaintHarness;
+
+    impl Render for RepaintHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn navigation_repaint_is_safe_from_an_event_update(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| RepaintHarness);
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                WorkbenchShell::request_visible_repaint(window)
+            })
+            .expect("request navigation repaint");
+        cx.run_until_parked();
     }
 }

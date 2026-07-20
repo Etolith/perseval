@@ -186,6 +186,7 @@ impl WorkbenchShell {
                 this.refresh_welcome_context(cx);
                 this.persist();
                 cx.notify();
+                cx.refresh_windows();
             }
             sources::SourcesEvent::TraceImported => {
                 this.refresh_welcome_context(cx);
@@ -394,6 +395,7 @@ impl WorkbenchShell {
                 this.persist();
                 cx.notify();
             }
+            runs::RunsEvent::OpenSources => this.open_activity(ActivityId::Sources, cx),
             runs::RunsEvent::ScopeChanged(scope) => {
                 this.model.apply(WorkbenchAction::SetScope(scope.clone()));
                 let preferences = this.model.failure_inbox_preferences();
@@ -721,24 +723,26 @@ impl WorkbenchShell {
         self.view_menu_open = false;
         self.project_menu_open = !self.project_menu_open;
         cx.notify();
+        cx.refresh_windows();
     }
 
-    fn create_project_from_switcher(&mut self, cx: &mut Context<Self>) {
+    fn create_project_from_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project_menu_open = false;
         self.sources
             .update(cx, |sources, cx| sources.show_project_creation(cx));
-        self.open_activity(ActivityId::Sources, cx);
+        self.open_activity_in_window(ActivityId::Sources, window, cx);
     }
 
-    fn manage_project_sources(&mut self, cx: &mut Context<Self>) {
+    fn manage_project_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project_menu_open = false;
-        self.open_activity(ActivityId::Sources, cx);
+        self.open_activity_in_window(ActivityId::Sources, window, cx);
     }
 
     fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
         self.project_menu_open = false;
         self.view_menu_open = !self.view_menu_open;
         cx.notify();
+        cx.refresh_windows();
     }
 
     fn set_project_scope(
@@ -766,15 +770,29 @@ impl WorkbenchShell {
         self.eval_review.update(cx, |evals, cx| {
             evals.set_project_scope(project_id.clone(), cx)
         });
-        if let Some(project_id) = project_id.as_deref() {
-            self.sources
-                .update(cx, |sources, cx| sources.select_project(project_id, cx));
-        }
+        self.sources.update(cx, |sources, cx| {
+            if let Some(project_id) = project_id.as_deref() {
+                sources.select_project(project_id, cx);
+            } else {
+                sources.select_all_projects(cx);
+            }
+        });
         self.refresh_welcome_context(cx);
         self.sync_failure_view(cx);
         self.project_menu_open = false;
         self.persist();
         cx.notify();
+        cx.refresh_windows();
+    }
+
+    fn set_project_scope_in_window(
+        &mut self,
+        project: crate::workbench::ProjectScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_project_scope(project, cx);
+        Self::request_navigation_repaint(window);
     }
 
     fn sync_failure_view(&mut self, cx: &mut Context<Self>) {
@@ -938,23 +956,23 @@ impl Render for WorkbenchShell {
             .role(Role::Application)
             .aria_label("Perseval trace investigation workbench")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &OpenFailures, _, cx| {
-                this.open_activity(ActivityId::Failures, cx)
+            .on_action(cx.listener(|this, _: &OpenFailures, window, cx| {
+                this.open_activity_in_window(ActivityId::Failures, window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &OpenRuns, _, cx| this.open_activity(ActivityId::Runs, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenCompare, _, cx| {
-                this.open_activity(ActivityId::Compare, cx)
+            .on_action(cx.listener(|this, _: &OpenRuns, window, cx| {
+                this.open_activity_in_window(ActivityId::Runs, window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &OpenEvals, _, cx| this.open_activity(ActivityId::Evals, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenSources, _, cx| {
-                this.open_activity(ActivityId::Sources, cx)
+            .on_action(cx.listener(|this, _: &OpenCompare, window, cx| {
+                this.open_activity_in_window(ActivityId::Compare, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_activity(ActivityId::Settings, cx)
+            .on_action(cx.listener(|this, _: &OpenEvals, window, cx| {
+                this.open_activity_in_window(ActivityId::Evals, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSources, window, cx| {
+                this.open_activity_in_window(ActivityId::Sources, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_activity_in_window(ActivityId::Settings, window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 this.open_command_palette(window, cx)

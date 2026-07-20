@@ -165,8 +165,12 @@ impl WorkbenchShell {
                                 .text_color(Theme::AMBER)
                                 .child("Portfolio view · mutations disabled"),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_project_scope(crate::workbench::ProjectScope::AllProjects, cx)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_project_scope_in_window(
+                                crate::workbench::ProjectScope::AllProjects,
+                                window,
+                                cx,
+                            )
                         })),
                 )
             });
@@ -209,33 +213,37 @@ impl WorkbenchShell {
                             .text_color(Theme::MUTED)
                             .child(project.project_id.clone()),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_project_scope(
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_project_scope_in_window(
                             crate::workbench::ProjectScope::Project(project_id.clone()),
+                            window,
                             cx,
                         )
                     })),
             );
         }
-        menu = menu.child(div().my_2().h(px(1.)).bg(Theme::BORDER)).child(
-            div()
-                .id("project-scope-create")
-                .role(Role::MenuItem)
-                .aria_label("Create a new project")
-                .tab_index(0)
-                .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
-                .h(px(36.))
-                .px_3()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|style| style.bg(Theme::PANEL_ALT))
-                .child(icon(AppIcon::Plus, 15., false))
-                .child("New project…")
-                .on_click(cx.listener(|this, _, _, cx| this.create_project_from_switcher(cx))),
-        );
+        menu =
+            menu.child(div().my_2().h(px(1.)).bg(Theme::BORDER)).child(
+                div()
+                    .id("project-scope-create")
+                    .role(Role::MenuItem)
+                    .aria_label("Create a new project")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                    .h(px(36.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(Theme::PANEL_ALT))
+                    .child(icon(AppIcon::Plus, 15., false))
+                    .child("New project…")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.create_project_from_switcher(window, cx)
+                    })),
+            );
         if self.selected_project_id().is_some() {
             menu = menu.child(
                 div()
@@ -254,7 +262,9 @@ impl WorkbenchShell {
                     .hover(|style| style.bg(Theme::PANEL_ALT))
                     .child(icon(AppIcon::Sources, 15., false))
                     .child("Manage trace sources")
-                    .on_click(cx.listener(|this, _, _, cx| this.manage_project_sources(cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.manage_project_sources(window, cx)),
+                    ),
             );
         }
         div()
@@ -315,8 +325,9 @@ impl WorkbenchShell {
         {
             let active = self.model.state.active_activity == activity;
             rail = rail.child(
-                activity_button(index, glyph, label, shortcut, active)
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_activity(activity, cx))),
+                activity_button(index, glyph, label, shortcut, active).on_click(cx.listener(
+                    move |this, _, window, cx| this.open_activity_in_window(activity, window, cx),
+                )),
             );
         }
         rail.child(div().flex_1()).child(
@@ -327,7 +338,9 @@ impl WorkbenchShell {
                 "⌘,",
                 self.model.state.active_activity == ActivityId::Settings,
             )
-            .on_click(cx.listener(|this, _, _, cx| this.open_activity(ActivityId::Settings, cx))),
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_activity_in_window(ActivityId::Settings, window, cx)
+            })),
         )
     }
 
@@ -389,26 +402,42 @@ impl WorkbenchShell {
                         cx.listener(move |this, _, _, cx| this.activate_editor(id.clone(), cx)),
                     )
                     .child(tab_title(&tab.resource))
-                    .when(!pinned, |tab_view| {
-                        tab_view.child(
-                            div()
-                                .id(("pin-editor", index))
-                                .role(Role::Button)
-                                .aria_label(format!("Pin {}", tab_title(&tab.resource)))
-                                .tab_index(0)
-                                .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
-                                .size(px(24.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_sm()
-                                .hover(|style| style.bg(Theme::PANEL_ALT))
-                                .child(icon(AppIcon::Pin, 14., true))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                    .child(
+                        div()
+                            .id(("pin-editor", index))
+                            .role(Role::Button)
+                            .aria_label(format!(
+                                "{} {}",
+                                if pinned { "Unpin" } else { "Pin" },
+                                tab_title(&tab.resource)
+                            ))
+                            .aria_toggled(if pinned {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .bg(if pinned {
+                                Theme::SELECTED
+                            } else {
+                                Theme::PANEL
+                            })
+                            .hover(|style| style.bg(Theme::PANEL_ALT))
+                            .child(icon(AppIcon::Pin, 14., pinned))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if pinned {
+                                    this.unpin_editor(pin_id.clone(), cx)
+                                } else {
                                     this.pin_editor(pin_id.clone(), cx)
-                                })),
-                        )
-                    })
+                                }
+                            })),
+                    )
                     .child(
                         div()
                             .id(("close-editor", index))

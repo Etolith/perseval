@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use gpui::{App, AppContext, Focusable};
+use gpui::{
+    App, AppContext, Application, Focusable, KeyBinding, Menu, MenuItem, QuitMode, actions,
+};
 use perseval_service::{PersevalConfigV1, ServiceRuntime};
 
 use super::runtime_mode::RuntimeMode;
@@ -11,6 +13,20 @@ use crate::screens::trace_fixture::{Workbench as TraceFixtureWorkbench, Workbenc
 use crate::screens::workbench_shell::{WorkbenchShell, init_key_bindings};
 
 const PROFILE_STARTUP_ENV: &str = "PERSEVAL_PROFILE_STARTUP";
+
+actions!(perseval_app, [Quit]);
+
+fn application() -> Application {
+    gpui_platform::application()
+        .with_quit_mode(QuitMode::LastWindowClosed)
+        .with_assets(crate::icons::PersevalAssets)
+}
+
+fn init_app_lifecycle(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    cx.set_menus([Menu::new("Perseval").items([MenuItem::action("Quit Perseval", Quit)])]);
+}
 
 pub struct PersevalApp {
     runtime: ServiceRuntime,
@@ -44,16 +60,15 @@ impl PersevalApp {
             );
         }
         let settings = WorkbenchSettings::from_environment();
-        gpui_platform::application()
-            .with_assets(crate::icons::PersevalAssets)
-            .run(move |cx: &mut App| {
-                init_text_input(cx);
-                cx.open_window(workbench_window("Perseval — Trace Workbench"), |_, cx| {
-                    cx.new(move |_| TraceFixtureWorkbench::new(catalog, settings, profile_started))
-                })
-                .expect("open Perseval window");
-                cx.activate(true);
-            });
+        application().run(move |cx: &mut App| {
+            init_app_lifecycle(cx);
+            init_text_input(cx);
+            cx.open_window(workbench_window("Perseval — Trace Workbench"), |_, cx| {
+                cx.new(move |_| TraceFixtureWorkbench::new(catalog, settings, profile_started))
+            })
+            .expect("open Perseval window");
+            cx.activate(true);
+        });
     }
 
     fn run_live(self) {
@@ -69,29 +84,28 @@ impl PersevalApp {
             .snapshot_and_subscribe()
             .expect("take initial trace snapshot");
         let runtime_for_window = runtime.clone();
-        gpui_platform::application()
-            .with_assets(crate::icons::PersevalAssets)
-            .run(move |cx: &mut App| {
-                init_key_bindings(cx);
-                init_failure_inbox_key_bindings(cx);
-                // Register the context-specific input bindings after global workbench
-                // shortcuts so Escape clears an active field before it bubbles to
-                // dismiss the surrounding surface.
-                init_text_input(cx);
-                let service = service.clone();
-                cx.open_window(
-                    workbench_window("Perseval — Live Trace Workbench"),
-                    |window, cx| {
-                        let shell = cx.new(move |cx| {
-                            WorkbenchShell::new(&shell_config, service, snapshot, subscription, cx)
-                        });
-                        shell.focus_handle(cx).focus(window, cx);
-                        shell
-                    },
-                )
-                .expect("open Perseval live window");
-                cx.activate(true);
-            });
+        application().run(move |cx: &mut App| {
+            init_app_lifecycle(cx);
+            init_key_bindings(cx);
+            init_failure_inbox_key_bindings(cx);
+            // Register the context-specific input bindings after global workbench
+            // shortcuts so Escape clears an active field before it bubbles to
+            // dismiss the surrounding surface.
+            init_text_input(cx);
+            let service = service.clone();
+            cx.open_window(
+                workbench_window("Perseval — Live Trace Workbench"),
+                |window, cx| {
+                    let shell = cx.new(move |cx| {
+                        WorkbenchShell::new(&shell_config, service, snapshot, subscription, cx)
+                    });
+                    shell.focus_handle(cx).focus(window, cx);
+                    shell
+                },
+            )
+            .expect("open Perseval live window");
+            cx.activate(true);
+        });
         if let Some(mcp_workspace) = mcp_workspace {
             mcp_workspace.shutdown();
         }

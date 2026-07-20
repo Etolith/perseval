@@ -648,7 +648,7 @@ mod tests {
     use crate::PersevalApp;
 
     #[test]
-    fn native_app_does_not_open_otlp_by_default() {
+    fn constructing_the_app_does_not_start_services() {
         let app = PersevalApp::new();
         assert!(app.runtime().capabilities().filesystem_watchers);
         assert!(!app.runtime().capabilities().otlp_listener);

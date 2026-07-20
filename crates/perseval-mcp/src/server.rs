@@ -54,14 +54,19 @@ impl ServerHandler for PersevalMcp {
                 None,
             )));
         }
-        if request.protocol_version != ProtocolVersion::V_2025_11_25 {
+        let protocol_version = request.protocol_version.clone();
+        if protocol_version != ProtocolVersion::V_2025_06_18
+            && protocol_version != ProtocolVersion::V_2025_11_25
+        {
             return std::future::ready(Err(McpError::invalid_request(
-                "Perseval MCP supports protocol version 2025-11-25",
+                "Perseval MCP supports protocol versions 2025-06-18 and 2025-11-25",
                 None,
             )));
         }
         context.peer.set_peer_info(request);
-        std::future::ready(Ok(self.get_info()))
+        let mut info = self.get_info();
+        info.protocol_version = protocol_version;
+        std::future::ready(Ok(info))
     }
 
     async fn list_tools(

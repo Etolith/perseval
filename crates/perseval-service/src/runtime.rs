@@ -310,7 +310,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gui_uses_filesystem_ingestion_without_a_listener_by_default() {
+    fn embedded_gui_marker_does_not_claim_started_services() {
         let runtime = ServiceRuntime::embedded_gui();
         assert!(runtime.capabilities().filesystem_watchers);
         assert!(!runtime.capabilities().otlp_listener);

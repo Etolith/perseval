@@ -944,7 +944,10 @@ impl FailureInbox {
                         }
                     )
                 })
-                .unwrap_or_else(|| missing_telemetry_summary(self.focused_span_snapshot.as_ref())),
+                .unwrap_or_else(|| {
+                    let spans = self.full_trace_timeline.loaded_rows();
+                    missing_telemetry_summary(self.focused_span_snapshot.as_ref(), &spans)
+                }),
             InspectorTab::Span => self
                 .focused_span_snapshot
                 .as_ref()
@@ -1140,12 +1143,21 @@ impl FailureInbox {
     }
 }
 
-fn missing_telemetry_summary(span: Option<&SpanRow>) -> String {
+fn missing_telemetry_summary(span: Option<&SpanRow>, trace_spans: &[SpanRow]) -> String {
+    let trace_has_error = trace_spans.iter().any(|span| span.status_code == 2);
     let Some(span) = span else {
-        return "This trace was opened without failure context. Select an error span to inspect why it was not classified as an actionable finding.".into();
+        return if trace_has_error {
+            "Choose an error span to see why it did or did not become a finding.".into()
+        } else {
+            "No errors or actionable findings in this trace.".into()
+        };
     };
     if span.status_code != 2 {
-        return "This trace was opened without failure context. Select an error span to inspect its behavioral telemetry.".into();
+        return if trace_has_error {
+            "Choose an error span to review its outcome and recovery.".into()
+        } else {
+            "No errors or actionable findings in this trace.".into()
+        };
     }
 
     let fact_present = |keys: &[&str]| {
@@ -1200,11 +1212,30 @@ fn missing_telemetry_summary(span: Option<&SpanRow>) -> String {
         missing.push("state evidence");
     }
 
-    if missing.is_empty() {
-        "This trace was opened without failure context. The selected error span contains the core behavioral facts, so inspect the root outcome and detector eligibility in Attributes.".into()
+    let recovered = trace_spans.iter().any(|candidate| {
+        candidate.parent_span_id == span.parent_span_id
+            && candidate.status_code != 2
+            && candidate
+                .attributes
+                .get("agent.state.observation")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| matches!(value, "verified_changed" | "verified_unchanged"))
+    });
+    let workflow_completed = trace_spans.iter().any(|candidate| {
+        candidate
+            .attributes
+            .get("agent.final.status")
+            .and_then(serde_json::Value::as_str)
+            == Some("completed")
+    });
+
+    if missing.is_empty() && recovered && workflow_completed {
+        "The timeout was followed by a successful state check, and the workflow completed. No actionable failure was created.".into()
+    } else if missing.is_empty() {
+        "This error has the required behavioral details but no actionable finding. Check the workflow outcome and nearby recovery spans.".into()
     } else {
         format!(
-            "This trace was opened without failure context.\n\nThe selected error span could not be classified as actionable. Missing telemetry: {}.\n\nOpen Attributes to inspect the raw facts, then instrument the missing fields and send another run.",
+            "This error is missing telemetry needed for a reliable diagnosis: {}. Add those fields and send another run.",
             missing.join(", ")
         )
     }
@@ -1246,7 +1277,7 @@ mod missing_telemetry_tests {
             ("tool.name".into(), json!("test_runner")),
         ]));
 
-        let summary = missing_telemetry_summary(Some(&row));
+        let summary = missing_telemetry_summary(Some(&row), std::slice::from_ref(&row));
 
         assert!(summary.contains("requiredness"));
         assert!(summary.contains("tool result"));
@@ -1254,5 +1285,45 @@ mod missing_telemetry_tests {
         assert!(summary.contains("retry safety"));
         assert!(summary.contains("state evidence"));
         assert!(!summary.contains("operation identity,"));
+    }
+
+    #[test]
+    fn clean_trace_has_a_plain_empty_state() {
+        let mut clean = span(BTreeMap::new());
+        clean.status_code = 0;
+
+        assert_eq!(
+            missing_telemetry_summary(None, &[clean]),
+            "No errors or actionable findings in this trace."
+        );
+    }
+
+    #[test]
+    fn recovered_timeout_explains_why_no_finding_exists() {
+        let mut timeout = span(BTreeMap::from([
+            ("agent.operation".into(), json!("place_service_hold")),
+            ("agent.tool.requirement".into(), json!("required")),
+            ("agent.tool.status".into(), json!("timed_out")),
+            ("agent.operation.effect".into(), json!("mutating")),
+            ("agent.operation.retry_safety".into(), json!("idempotent")),
+            ("agent.state.observation".into(), json!("ambiguous")),
+        ]));
+        timeout.parent_span_id = Some("logical-tool".into());
+        let mut recovery = span(BTreeMap::from([(
+            "agent.state.observation".into(),
+            json!("verified_changed"),
+        )]));
+        recovery.status_code = 0;
+        recovery.parent_span_id = Some("logical-tool".into());
+        let mut root = span(BTreeMap::from([(
+            "agent.final.status".into(),
+            json!("completed"),
+        )]));
+        root.status_code = 0;
+
+        assert!(
+            missing_telemetry_summary(Some(&timeout), &[timeout.clone(), recovery, root])
+                .contains("workflow completed")
+        );
     }
 }

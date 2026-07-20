@@ -38,7 +38,7 @@ impl SettingsCategory {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::WorkspaceStorage => "Workspace & storage",
+            Self::WorkspaceStorage => "Workspace & collection",
             Self::PrivacyPayloads => "Privacy & payloads",
             Self::AiFeatures => "AI features",
             Self::Appearance => "Appearance",
@@ -47,16 +47,10 @@ impl SettingsCategory {
 
     const fn description(self) -> &'static str {
         match self {
-            Self::WorkspaceStorage => {
-                "Choose the durable workspace and configure local trace ingestion."
-            }
-            Self::PrivacyPayloads => {
-                "Control bounded payload reveals and understand what remains on disk."
-            }
-            Self::AiFeatures => {
-                "Tune deterministic grouping and explicitly opt into hosted analysis."
-            }
-            Self::Appearance => "Adjust reading scale and motion without restarting the workbench.",
+            Self::WorkspaceStorage => "Choose where data lives and how local traces arrive.",
+            Self::PrivacyPayloads => "Control local payload previews and storage.",
+            Self::AiFeatures => "Choose local or hosted analysis.",
+            Self::Appearance => "Adjust reading scale and motion.",
         }
     }
 
@@ -305,7 +299,7 @@ impl SettingsScreen {
         cx.notify();
     }
 
-    fn save_configuration(&mut self, cx: &mut Context<Self>) {
+    fn save_and_restart(&mut self, cx: &mut Context<Self>) {
         if self.saving {
             return;
         }
@@ -329,15 +323,11 @@ impl SettingsScreen {
             let _ = weak.update(cx, |this, cx| {
                 this.saving = false;
                 match result {
-                    Ok(path) => {
+                    Ok(_) => {
                         this.saved_config = candidate;
-                        this.save_notice = Some((
-                            format!(
-                                "Saved to {}. Restart Perseval to apply runtime changes.",
-                                path.display()
-                            ),
-                            Theme::GREEN,
-                        ));
+                        this.save_notice =
+                            Some(("Saved. Restarting Perseval…".into(), Theme::GREEN));
+                        cx.restart();
                     }
                     Err(error) => {
                         this.save_notice = Some((error.to_string(), Theme::RED));
@@ -503,10 +493,7 @@ impl SettingsScreen {
     }
 
     fn storage_section(&self, stack_rows: bool) -> impl IntoElement {
-        section(
-            "Current storage",
-            "The workspace open in this process. A saved workspace change takes effect after restart.",
-        )
+        section("Current storage", "Local data for the current workspace.")
             .child(setting_row(
                 "Workspace",
                 self.runtime_config.workspace_dir.display().to_string(),
@@ -520,55 +507,19 @@ impl SettingsScreen {
                 stack_rows,
             ))
             .when_some(self.size_error.clone(), |section, error| {
-                section.child(notice(
-                    "Workspace size unavailable",
-                    error,
-                    Theme::AMBER,
-                ))
+                section.child(notice("Workspace size unavailable", error, Theme::AMBER))
             })
             .child(setting_row(
-                "Control and journal",
-                self.runtime_config.workspace_dir.join("control.sqlite3").display().to_string(),
-                stack_rows,
-            ))
-            .child(setting_row(
-                "Analytical projection",
-                self.runtime_config
-                    .workspace_dir
-                    .join("analytics/traces.duckdb")
-                    .display()
-                    .to_string(),
-                stack_rows,
-            ))
-            .child(setting_row(
-                "Content-addressed payloads",
-                self.runtime_config.workspace_dir.join("blobs").display().to_string(),
-                stack_rows,
-            ))
-            .child(setting_row(
                 "Retention",
-                "Keep all revisions until an explicit cleanup policy exists".into(),
-                stack_rows,
-            ))
-            .child(notice(
-                "Cleanup is intentionally unavailable",
-                "Perseval will not delete trace or payload data behind your back. Retention and orphan-blob cleanup need a reviewed policy before destructive controls are enabled.".into(),
-                Theme::AMBER,
-            ))
-            .child(setting_row(
-                "Migration status",
-                format!(
-                    "Configuration schema v{} · forward-only store migrations applied",
-                    self.runtime_config.schema_version
-                ),
+                "Keep all data; automatic cleanup is not available yet".into(),
                 stack_rows,
             ))
     }
 
     fn runtime_section(&self, stack_rows: bool, cx: &mut Context<Self>) -> impl IntoElement {
         section(
-            "Workspace and ingestion",
-            "Saved changes apply on the next launch because the runtime owns the database and OTLP listener.",
+            "Workspace and collection",
+            "Saving restarts Perseval so these changes take effect.",
         )
         .child(editable_row(
             "Workspace ID",
@@ -578,7 +529,7 @@ impl SettingsScreen {
         ))
         .child(editable_row(
             "Workspace directory",
-            "Durable SQLite, DuckDB, and payload location",
+            "Where Perseval stores local data",
             self.workspace_dir.clone(),
             stack_rows,
         ))
@@ -590,7 +541,7 @@ impl SettingsScreen {
         ))
         .child(switch_row(
             "OTLP/HTTP receiver",
-            "Accept local JSON and protobuf at /v1/traces",
+            "Receive local traces over HTTP",
             if self.draft.otlp.enabled { "On" } else { "Off" },
             self.draft.otlp.enabled,
             "toggle-otlp",
@@ -608,23 +559,23 @@ impl SettingsScreen {
     fn privacy_section(&self, stack_rows: bool, cx: &mut Context<Self>) -> impl IntoElement {
         section(
             "Privacy and payloads",
-            "Set bounded defaults; payload bodies still require an explicit reveal.",
+            "Control how much payload data a user can reveal.",
         )
         .child(editable_row(
             "Inline attribute limit (KiB)",
-            "Larger and known-sensitive attributes become blob references",
+            "Store larger or sensitive attributes separately",
             self.inline_attribute_kib.clone(),
             stack_rows,
         ))
         .child(editable_row(
             "Default payload preview (KiB)",
-            "Maximum bytes read by the first reveal action",
+            "Maximum size of the first preview",
             self.default_preview_kib.clone(),
             stack_rows,
         ))
         .child(switch_row(
             "Larger local reveal",
-            "Allow an explicit second reveal above the default preview",
+            "Allow a second, larger local preview",
             if self.draft.blobs.allow_larger_local_reveal { "Allowed" } else { "Blocked" },
             self.draft.blobs.allow_larger_local_reveal,
             "toggle-larger-reveal",
@@ -633,38 +584,37 @@ impl SettingsScreen {
         ))
         .child(editable_row(
             "Maximum local reveal (MiB)",
-            "Hard upper bound when larger reveal is allowed",
+            "Maximum size of the larger preview",
             self.maximum_reveal_mib.clone(),
             stack_rows,
         ))
         .child(setting_row(
             "Known sensitive payloads",
-            "Prompts, messages, reasoning, source code, tool payloads, inputs, and outputs are externalized".into(),
+            "Stored separately and hidden until you explicitly reveal them".into(),
             stack_rows,
         ))
         .child(notice(
-            "Externalization is not redaction",
-            "Payload bodies are hidden behind an explicit bounded reveal, but Perseval does not yet remove secrets or personal data from stored content. Configure telemetry at the producer accordingly.".into(),
+            "Hidden is not redacted",
+            "Perseval may still store secrets or personal data. Keep sensitive data out of telemetry at the source.".into(),
             Theme::RED,
         ))
     }
 
     fn analysis_section(&self, stack_rows: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let provider_status = if !self.openai_health.enabled {
-            "Hosted analysis is not active in this process. Saved changes apply after restart."
-                .to_string()
+            "OpenAI options are off. Saving changes restarts Perseval.".to_string()
         } else if !self.openai_health.configured {
-            "OPENAI_API_KEY is not available to this process; deterministic analysis is still active."
-                .to_string()
+            "OPENAI_API_KEY is missing. Local analysis stays available.".to_string()
         } else if self.openai_health.running_jobs > 0 {
             format!(
                 "{} hosted analysis job(s) running · {} completed",
                 self.openai_health.running_jobs, self.openai_health.successful_jobs
             )
         } else if self.openai_health.degraded {
-            self.openai_health.last_error.clone().unwrap_or_else(|| {
-                "Hosted analysis is degraded; deterministic analysis is still active.".into()
-            })
+            self.openai_health
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "OpenAI is unavailable. Local analysis stays available.".into())
         } else {
             format!(
                 "Ready · {} hosted jobs completed",
@@ -678,11 +628,11 @@ impl SettingsScreen {
         };
         section(
             "Analysis",
-            "Control deterministic and hosted augmentations without changing stored trace data.",
+            "Choose local or hosted analysis.",
         )
         .child(switch_row(
             "Feature similarity",
-            "Use local trace features to improve failure-group similarity",
+            "Group failures using local trace features",
             if self.draft.analysis.feature_similarity_enabled { "On" } else { "Off" },
             self.draft.analysis.feature_similarity_enabled,
             "toggle-feature-similarity",
@@ -690,13 +640,13 @@ impl SettingsScreen {
             stack_rows,
         ))
         .child(notice(
-            "Local and deterministic",
-            "With OpenAI embeddings off, this uses the local signed-feature hash and makes no network calls. Hosted embeddings remain a separate explicit opt-in below.".into(),
+            "Runs locally",
+            "No data leaves your Mac unless an OpenAI option below is on.".into(),
             Theme::CYAN,
         ))
         .child(switch_row(
             "OpenAI augmentations",
-            "Reveal and enable hosted features; no request occurs until a subfeature is on",
+            "Show hosted options. Nothing is sent until one is enabled",
             if self.draft.analysis.openai.enabled { "On" } else { "Off" },
             self.draft.analysis.openai.enabled,
             "toggle-openai",
@@ -707,7 +657,7 @@ impl SettingsScreen {
             hosted
                 .child(switch_row(
                     "OpenAI embeddings",
-                    "Embed only safe failure projections for secondary similarity cohorts",
+                    "Improve similarity groups using safe failure summaries",
                     if self.draft.analysis.openai.embeddings_enabled { "On" } else { "Off" },
                     self.draft.analysis.openai.embeddings_enabled,
                     "toggle-openai-embeddings",
@@ -716,7 +666,7 @@ impl SettingsScreen {
                 ))
                 .child(switch_row(
                     "OpenAI cluster labels",
-                    "Name locally fitted cohorts from their bounded representative cases",
+                    "Name similarity groups using safe failure summaries",
                     if self.draft.analysis.openai.cluster_labels_enabled { "On" } else { "Off" },
                     self.draft.analysis.openai.cluster_labels_enabled,
                     "toggle-openai-cluster-labels",
@@ -725,7 +675,7 @@ impl SettingsScreen {
                 ))
                 .child(switch_row(
                     "OpenAI semantic judge",
-                    "Review structured behavior facts; raw payload bodies are never included",
+                    "Review behavior facts without raw payloads",
                     if self.draft.analysis.openai.semantic_judge_enabled { "On" } else { "Off" },
                     self.draft.analysis.openai.semantic_judge_enabled,
                     "toggle-openai-semantic-judge",
@@ -747,7 +697,7 @@ impl SettingsScreen {
                 .child(notice("OpenAI runtime", provider_status, provider_tint))
                 .child(notice(
                     "Privacy boundary",
-                    "The API key stays in OPENAI_API_KEY and is never written to Perseval's config or databases. Hosted features receive only versioned safe projections; payload blobs, prompts, reasoning, source code, tool payloads, inputs, and outputs stay local.".into(),
+                    "OPENAI_API_KEY is never saved. Hosted features receive safe summaries only; prompts, reasoning, code, tool data, inputs, and outputs stay local.".into(),
                     Theme::GREEN,
                 ))
         })
@@ -782,20 +732,22 @@ impl SettingsScreen {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(if changed {
-                                "Unsaved configuration changes"
+                                "Restart required"
                             } else {
-                                "Configuration is saved"
+                                "No unsaved changes"
                             }),
                     )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(Theme::MUTED)
-                            .child(validation_error.unwrap_or_else(|| {
-                                "Appearance applies immediately; workspace, ingestion, privacy, and analysis settings apply after restart.".into()
-                            })),
-                    ),
+                    .child(div().mt_1().text_xs().text_color(Theme::MUTED).child(
+                        validation_error.unwrap_or_else(|| {
+                            if changed {
+                                "Save to restart Perseval with these changes.".into()
+                            } else if self.selected_category == SettingsCategory::Appearance {
+                                "Appearance changes apply immediately.".into()
+                            } else {
+                                "Edit a setting to enable Save and restart.".into()
+                            }
+                        }),
+                    )),
             )
             .child(
                 div()
@@ -810,11 +762,15 @@ impl SettingsScreen {
                         cx.listener(|this, _, _, cx| this.discard_changes(cx)),
                     ))
                     .child(action_button(
-                        if self.saving { "Saving…" } else { "Save settings" },
-                        "Save configuration settings",
+                        if self.saving {
+                            "Saving…"
+                        } else {
+                            "Save and restart"
+                        },
+                        "Save settings and restart Perseval",
                         save_enabled,
                         true,
-                        cx.listener(|this, _, _, cx| this.save_configuration(cx)),
+                        cx.listener(|this, _, _, cx| this.save_and_restart(cx)),
                     )),
             )
     }
@@ -910,9 +866,6 @@ impl Render for SettingsScreen {
             .as_ref()
             .is_ok_and(|candidate| candidate != &self.saved_config);
         let validation_error = candidate.err();
-        let config_path = PersevalConfigV1::file_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|error| error.to_string());
         div()
             .id("settings")
             .role(gpui::Role::Document)
@@ -951,7 +904,7 @@ impl Render for SettingsScreen {
                                     .mt_1()
                                     .text_sm()
                                     .text_color(Theme::MUTED)
-                                    .child("Workspace policy, privacy boundaries, AI providers, and accessibility preferences."),
+                                    .child("Collection, privacy, AI, and accessibility."),
                             ),
                     )
                     .when(!compact, |header| {
@@ -963,8 +916,9 @@ impl Render for SettingsScreen {
                                 .text_right()
                                 .text_color(Theme::DIM)
                                 .child(format!(
-                                    "Effective workspace: {} · {}",
-                                    self.runtime_config.workspace_id, config_path
+                                    "Perseval {} · Workspace: {}",
+                                    env!("CARGO_PKG_VERSION"),
+                                    self.runtime_config.workspace_id
                                 )),
                         )
                     }),
@@ -1120,8 +1074,10 @@ mod tests {
     #[gpui::test]
     fn editable_settings_validate_and_update_the_draft(cx: &mut TestAppContext) {
         let screen = cx.new(|cx| {
+            let mut config = PersevalConfigV1::default();
+            config.otlp.enabled = false;
             SettingsScreen::new(
-                PersevalConfigV1::default(),
+                config,
                 AppearancePreferencesV1::default(),
                 OpenAiProviderHealthV1::default(),
                 cx,

@@ -181,7 +181,7 @@ impl Default for PersevalConfigV1 {
 impl Default for OtlpConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             bind_addr: "127.0.0.1:4318"
                 .parse()
                 .expect("valid default OTLP address"),
@@ -644,9 +644,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_bounded_and_offline() {
+    fn defaults_enable_only_local_collection() {
         let config = PersevalConfigV1::default();
-        assert!(!config.otlp.enabled);
+        assert!(config.otlp.enabled);
+        assert!(config.otlp.bind_addr.ip().is_loopback());
         assert!(!config.analysis.feature_similarity_enabled);
         assert!(!config.analysis.openai.enabled);
         assert!(!config.analysis.openai.embeddings_enabled);

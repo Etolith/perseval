@@ -131,6 +131,14 @@ impl WorkbenchModel {
                     tab.pinned = true;
                 }
             }
+            WorkbenchAction::UnpinEditor(id) => {
+                self.state.editors.retain(|tab| tab.id == id || tab.pinned);
+                if let Some(tab) = self.state.editors.iter_mut().find(|tab| tab.id == id) {
+                    tab.pinned = false;
+                    self.state.active_activity = tab.resource.kind().activity();
+                    self.state.active_editor = Some(id);
+                }
+            }
             WorkbenchAction::CloseEditor(id) => {
                 let was_active = self.state.active_editor.as_ref() == Some(&id);
                 self.state.editors.retain(|tab| tab.id != id);
@@ -413,7 +421,15 @@ mod tests {
         );
 
         let second_preview = model.state.active_editor.clone().expect("preview id");
-        model.apply(WorkbenchAction::PinEditor(second_preview));
+        model.apply(WorkbenchAction::PinEditor(second_preview.clone()));
+        assert!(
+            model
+                .state
+                .editors
+                .iter()
+                .find(|tab| tab.id == second_preview)
+                .is_some_and(|tab| tab.pinned)
+        );
         model.apply(WorkbenchAction::OpenEditor {
             resource: EditorResource::FullTrace {
                 project_id: "checkout".into(),
@@ -425,6 +441,20 @@ mod tests {
             pinned: false,
         });
         assert_eq!(model.state.editors.len(), 2);
+        assert_eq!(
+            model.state.editors.iter().filter(|tab| !tab.pinned).count(),
+            1
+        );
+
+        model.apply(WorkbenchAction::UnpinEditor(second_preview.clone()));
+        assert!(
+            model
+                .state
+                .editors
+                .iter()
+                .find(|tab| tab.id == second_preview)
+                .is_some_and(|tab| !tab.pinned)
+        );
         assert_eq!(
             model.state.editors.iter().filter(|tab| !tab.pinned).count(),
             1

@@ -426,15 +426,11 @@ impl FailureInbox {
                 .justify_between()
                 .gap_4()
                 .child(div().text_sm().text_color(Theme::MUTED).child(
-                    if self.has_active_group_filters() {
-                        "No failure groups match the current filters."
-                    } else if self.health.analysis_pending > 0 || self.health.analysis_running > 0 {
-                        "Finalized traces are being analyzed. Groups will appear here."
-                    } else if self.run_count == 0 {
-                        "No traces have arrived in this scope yet."
-                    } else {
-                        "No actionable groups. Error spans remain in Runs when requiredness or final-outcome evidence is missing; open a run to review its telemetry gaps."
-                    },
+                    empty_failure_groups_message(
+                        self.has_active_group_filters(),
+                        self.health.analysis_pending > 0 || self.health.analysis_running > 0,
+                        self.run_count,
+                    ),
                 ));
             if self.has_active_group_filters() {
                 empty = empty.child(
@@ -1000,6 +996,22 @@ pub(super) fn short_hash(value: &str) -> &str {
     value.get(..value.len().min(12)).unwrap_or(value)
 }
 
+fn empty_failure_groups_message(
+    filters_active: bool,
+    analysis_active: bool,
+    run_count: u64,
+) -> &'static str {
+    if filters_active {
+        "No failure groups match the current filters."
+    } else if analysis_active {
+        "Finalized traces are being analyzed. Groups will appear here."
+    } else if run_count == 0 {
+        "No traces have arrived in this scope yet."
+    } else {
+        "No actionable groups. Recovered errors and completed runs remain in Runs for review."
+    }
+}
+
 fn display_timestamp(value: &str) -> String {
     let parsed = chrono::DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
@@ -1017,7 +1029,7 @@ fn display_timestamp(value: &str) -> String {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use super::display_timestamp;
+    use super::{display_timestamp, empty_failure_groups_message};
 
     #[test]
     fn otlp_nanoseconds_and_rfc3339_are_humanized() {
@@ -1030,5 +1042,13 @@ mod timestamp_tests {
             "Jul 12 · 14:30 UTC"
         );
         assert_eq!(display_timestamp("unknown"), "unknown");
+    }
+
+    #[test]
+    fn empty_groups_explain_successful_recovery() {
+        assert_eq!(
+            empty_failure_groups_message(false, false, 1),
+            "No actionable groups. Recovered errors and completed runs remain in Runs for review."
+        );
     }
 }

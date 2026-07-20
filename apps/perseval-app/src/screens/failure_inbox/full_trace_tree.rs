@@ -92,6 +92,19 @@ impl FullTraceTreeModel {
         );
     }
 
+    pub fn loaded_parent_ids(&self) -> Vec<String> {
+        let mut parent_ids = self
+            .pages
+            .values()
+            .flat_map(|page| page.rows.iter())
+            .filter(|span| span.has_children)
+            .map(|span| span.span_id.clone())
+            .collect::<Vec<_>>();
+        parent_ids.sort();
+        parent_ids.dedup();
+        parent_ids
+    }
+
     pub fn has_page(&self, key: &TreePageKey) -> bool {
         self.pages.contains_key(key)
     }
@@ -234,5 +247,25 @@ mod tests {
             tree.visible_rows().last(),
             Some(FullTraceListRow::LoadMore { offset: 1, .. })
         ));
+    }
+
+    #[test]
+    fn loaded_parent_ids_are_bounded_to_cached_branches() {
+        let mut tree = FullTraceTreeModel::new(8);
+        let root_key = TreePageKey::new(None, 0);
+        tree.finish_load(
+            &root_key,
+            page(
+                None,
+                vec![row("root", None, true), row("leaf", None, false)],
+            ),
+        );
+        let child_key = TreePageKey::new(Some("root".into()), 0);
+        tree.finish_load(
+            &child_key,
+            page(Some("root"), vec![row("tool", Some("root"), true)]),
+        );
+
+        assert_eq!(tree.loaded_parent_ids(), vec!["root", "tool"]);
     }
 }

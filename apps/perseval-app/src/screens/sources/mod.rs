@@ -22,6 +22,7 @@ pub(crate) struct SourcesScreen {
     endpoint: String,
     project_name: Entity<TextInput>,
     selected_project_id: Option<String>,
+    portfolio_scope: bool,
     project_creation_open: bool,
     creating: bool,
     importing: bool,
@@ -57,6 +58,7 @@ impl SourcesScreen {
             endpoint,
             project_name,
             selected_project_id,
+            portfolio_scope: false,
             project_creation_open,
             creating: false,
             importing: false,
@@ -87,10 +89,23 @@ impl SourcesScreen {
             .any(|project| project.project_id == project_id)
         {
             self.selected_project_id = Some(project_id.to_string());
+            self.portfolio_scope = false;
             self.import_error = None;
             self.sample_error = None;
             cx.notify();
         }
+    }
+
+    pub(crate) fn select_all_projects(&mut self, cx: &mut Context<Self>) {
+        self.selected_project_id = None;
+        self.portfolio_scope = true;
+        self.project_creation_open = false;
+        self.import_error = None;
+        self.import_confirmation = None;
+        self.sample_confirmation_pending = false;
+        self.sample_error = None;
+        self.sample_confirmation = None;
+        cx.notify();
     }
 
     pub(crate) fn show_project_creation(&mut self, cx: &mut Context<Self>) {
@@ -117,8 +132,7 @@ impl SourcesScreen {
         };
         self.importing = true;
         self.import_error = None;
-        self.import_confirmation =
-            Some("Choose a bounded OTLP JSON or protobuf trace file…".into());
+        self.import_confirmation = Some("Choose an OTLP JSON or protobuf trace file…".into());
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -162,7 +176,7 @@ impl SourcesScreen {
                         this.import_error = None;
                         this.import_confirmation = Some(if result.duplicate_request {
                             format!(
-                                "{} was already imported; the durable journal stayed unchanged.",
+                                "{} was already imported; nothing changed.",
                                 result.file_name
                             )
                         } else {
@@ -302,6 +316,7 @@ impl SourcesScreen {
                 match result {
                     Ok(project) => {
                         this.selected_project_id = Some(project.project_id.clone());
+                        this.portfolio_scope = false;
                         this.project_creation_open = false;
                         this.projects.push(project.clone());
                         this.projects.sort_by_key(|project| {
@@ -311,7 +326,7 @@ impl SourcesScreen {
                             )
                         });
                         this.project_confirmation = Some(format!(
-                            "Created {}. Add its project attribute before sending traces.",
+                            "Created {}. Copy its project attribute before sending traces.",
                             project.display_name
                         ));
                         this.project_name
@@ -340,13 +355,13 @@ impl SourcesScreen {
             (
                 "Listening",
                 Theme::GREEN,
-                "The loopback OTLP receiver is ready for JSON or protobuf trace batches.",
+                "Ready to receive local OTLP traces.",
             )
         } else {
             (
                 "Receiver disabled",
                 Theme::AMBER,
-                "Enable OTLP in Perseval configuration, then restart the embedded app.",
+                "Turn on the local receiver in Settings.",
             )
         };
         section("Current source")
@@ -378,28 +393,9 @@ impl SourcesScreen {
                             .text_color(Theme::MUTED)
                             .child(detail),
                     )
-                    .child(div().mt_3().text_xs().text_color(Theme::DIM).child(format!(
-                        "queue {}/{} · journal lag {} · projection lag {} · rejected spans {}",
-                        self.health.queue_batches,
-                        self.health.queue_batch_capacity,
-                        self.health.journal_lag,
-                        self.health.projection_lag,
-                        self.health.rejected_spans
-                    )))
-                    .child(div().mt_2().text_xs().text_color(Theme::MUTED).child(format!(
-                        "run lifecycle: {} live · {} quiescent · {} finalized · {} reopened",
-                        self.health.live_runs,
-                        self.health.quiescent_runs,
-                        self.health.finalized_runs,
-                        self.health.reopened_runs
-                    )))
-                    .child(
-                        div()
-                            .mt_2()
-                            .text_xs()
-                            .text_color(Theme::DIM)
-                            .child("Zero queue and projection lag means the trace is durable. A live run still waits for the configured idle and finalization windows before analysis."),
-                    ),
+                    .when_some(self.health.last_error.clone(), |card, error| {
+                        card.child(message(error, Theme::RED))
+                    }),
             )
             .when(self.health.enabled, |card| {
                 card.child(copyable_field(
@@ -439,7 +435,7 @@ impl SourcesScreen {
                     .mt_2()
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("Uses the same durable journal and bounded projection path as live OTLP. Supported: .json, .pb, .protobuf, .bin, and gzip-compressed variants."),
+                    .child("Import OTLP JSON, protobuf, or gzip files into the selected project."),
             )
             .child(read_only_field(
                 "Destination project",
@@ -453,7 +449,7 @@ impl SourcesScreen {
                     .bg(Theme::WARNING_SURFACE)
                     .text_xs()
                     .text_color(Theme::AMBER)
-                    .child("The selected project identity is added explicitly to every imported span. Files over the configured wire-size limit are rejected before reading."),
+                    .child("Perseval tags imported spans with the selected project. Oversized files are rejected."),
             )
             .when_some(self.import_error.clone(), |form, error| {
                 form.child(message(error, Theme::RED))
@@ -578,7 +574,7 @@ impl SourcesScreen {
                     .mt_2()
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("A deterministic, offline OTLP sample: 3 checkout-agent runs and 33 spans across planner, browser, and verifier agents. It includes repeated browser failures and uses the same durable ingestion and traces-to-evals analysis path as your own traces."),
+                    .child("Load 3 offline agent runs with a repeated browser failure."),
             )
             .child(
                 div()
@@ -588,7 +584,7 @@ impl SourcesScreen {
                     .bg(Theme::INFO_SURFACE)
                     .text_xs()
                     .text_color(Theme::CYAN)
-                    .child("Clearly labeled local demo data · no network or model provider is used · loading it again is idempotent"),
+                    .child("Local only. No network or model calls. Loading twice does not create duplicates."),
             )
             .when(self.sample_confirmation_pending, |card| {
                 card.child(
@@ -704,10 +700,16 @@ impl Render for SourcesScreen {
                 .iter()
                 .find(|project| project.project_id == id)
         });
-        let page_title = selected_project
-            .map(|project| format!("Connect traces to {}", project.display_name))
-            .unwrap_or_else(|| "Create your first project".into());
-        let page_description = if selected_project.is_some() {
+        let page_title = if self.portfolio_scope {
+            "All projects is read-only".into()
+        } else {
+            selected_project
+                .map(|project| format!("Connect traces to {}", project.display_name))
+                .unwrap_or_else(|| "Create your first project".into())
+        };
+        let page_description = if self.portfolio_scope {
+            "Select a project to connect traces or import data."
+        } else if selected_project.is_some() {
             "Choose one way to add traces. Project creation is finished and stays out of the way."
         } else {
             "A project keeps one agent system, its builds, traces, findings, and evals in one scope."
@@ -761,41 +763,44 @@ impl Render for SourcesScreen {
                                                     .child(page_description),
                                             ),
                                     )
-                                    .when(!self.projects.is_empty(), |header| {
-                                        header.child(
-                                            div()
-                                                .id("toggle-new-project")
-                                                .role(gpui::Role::Button)
-                                                .aria_label(if self.project_creation_open {
-                                                    "Cancel creating a new project"
-                                                } else {
-                                                    "Create a new project"
-                                                })
-                                                .aria_expanded(self.project_creation_open)
-                                                .tab_index(0)
-                                                .focus_visible(|style| {
-                                                    style.border_2().border_color(Theme::CYAN)
-                                                })
-                                                .h(px(ControlSize::DEFAULT))
-                                                .px_4()
-                                                .flex()
-                                                .items_center()
-                                                .rounded(px(5.))
-                                                .border_1()
-                                                .border_color(Theme::BORDER)
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .cursor_pointer()
-                                                .child(if self.project_creation_open {
-                                                    "Cancel"
-                                                } else {
-                                                    "New project"
-                                                })
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.toggle_project_creation(cx)
-                                                })),
-                                        )
-                                    }),
+                                    .when(
+                                        !self.projects.is_empty() && !self.portfolio_scope,
+                                        |header| {
+                                            header.child(
+                                                div()
+                                                    .id("toggle-new-project")
+                                                    .role(gpui::Role::Button)
+                                                    .aria_label(if self.project_creation_open {
+                                                        "Cancel creating a new project"
+                                                    } else {
+                                                        "Create a new project"
+                                                    })
+                                                    .aria_expanded(self.project_creation_open)
+                                                    .tab_index(0)
+                                                    .focus_visible(|style| {
+                                                        style.border_2().border_color(Theme::CYAN)
+                                                    })
+                                                    .h(px(ControlSize::DEFAULT))
+                                                    .px_4()
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded(px(5.))
+                                                    .border_1()
+                                                    .border_color(Theme::BORDER)
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .cursor_pointer()
+                                                    .child(if self.project_creation_open {
+                                                        "Cancel"
+                                                    } else {
+                                                        "New project"
+                                                    })
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_project_creation(cx)
+                                                    })),
+                                            )
+                                        },
+                                    ),
                             )
                             .when(
                                 self.projects.is_empty() || self.project_creation_open,
@@ -806,6 +811,9 @@ impl Render for SourcesScreen {
                                     .child(self.render_health(cx))
                                     .child(self.render_local_demo(cx))
                                     .child(self.render_import(cx))
+                            })
+                            .when(self.portfolio_scope, |content| {
+                                content.child(self.render_health(cx))
                             }),
                     ),
             )

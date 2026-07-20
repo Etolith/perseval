@@ -31,6 +31,10 @@ pub(super) fn ensure_logical_trace(
         .or_else(|| string_attr(&span.attributes, "gen_ai.agent.id"))
         .or_else(|| string_attr(&span.resource, "agent.id"))
         .or_else(|| string_attr(&span.attributes, "agent.id"));
+    let root_title = span
+        .external_parent_span_id
+        .is_none()
+        .then(|| span.name.clone());
     let identity_quality = if project.is_some() {
         IdentityQualityV1::Explicit
     } else {
@@ -41,7 +45,7 @@ pub(super) fn ensure_logical_trace(
             let next = revision + 1;
             transaction.execute(
                 "UPDATE logical_traces SET revision = ?1, lifecycle = 'reopened', last_committed_unix_ms = ?2,
-                    title = ?3, service_name = COALESCE(?4, service_name), environment = COALESCE(?5, environment),
+                    title = COALESCE(?3, title), service_name = COALESCE(?4, service_name), environment = COALESCE(?5, environment),
                     project_id = CASE WHEN project_id = 'unassigned' AND ?6 IS NOT NULL THEN ?6 ELSE project_id END,
                     session_id = COALESCE(?7, session_id), build_id = COALESCE(?8, build_id),
                     agent_id = COALESCE(?9, agent_id),
@@ -49,7 +53,7 @@ pub(super) fn ensure_logical_trace(
                     start_time_unix_nano = ?11, end_time_unix_nano = ?12, span_count = 0, error_count = 0,
                     analysis_status = 'reanalyzing'
                  WHERE logical_trace_id = ?13",
-                params![next, now, span.name, service, environment, project, session_id, build_id, agent_id, identity_quality.as_str(), span.start_time_unix_nano as i64, span.end_time_unix_nano as i64, span.logical_trace_id],
+                params![next, now, root_title, service, environment, project, session_id, build_id, agent_id, identity_quality.as_str(), span.start_time_unix_nano as i64, span.end_time_unix_nano as i64, span.logical_trace_id],
             )?;
             transaction.execute(
                 "INSERT INTO trace_revisions (
@@ -62,12 +66,13 @@ pub(super) fn ensure_logical_trace(
         }
         transaction.execute(
             "UPDATE logical_traces SET lifecycle = CASE WHEN lifecycle = 'quiescent' THEN 'live' ELSE lifecycle END,
-                    project_id = CASE WHEN project_id = 'unassigned' AND ?1 IS NOT NULL THEN ?1 ELSE project_id END,
-                    session_id = COALESCE(?2, session_id), build_id = COALESCE(?3, build_id),
-                    agent_id = COALESCE(?4, agent_id),
-                    identity_quality = CASE WHEN ?5 = 'explicit' THEN 'explicit' ELSE identity_quality END,
-                    last_committed_unix_ms = ?6 WHERE logical_trace_id = ?7",
-            params![project, session_id, build_id, agent_id, identity_quality.as_str(), now, span.logical_trace_id],
+                    title = COALESCE(?1, title),
+                    project_id = CASE WHEN project_id = 'unassigned' AND ?2 IS NOT NULL THEN ?2 ELSE project_id END,
+                    session_id = COALESCE(?3, session_id), build_id = COALESCE(?4, build_id),
+                    agent_id = COALESCE(?5, agent_id),
+                    identity_quality = CASE WHEN ?6 = 'explicit' THEN 'explicit' ELSE identity_quality END,
+                    last_committed_unix_ms = ?7 WHERE logical_trace_id = ?8",
+            params![root_title, project, session_id, build_id, agent_id, identity_quality.as_str(), now, span.logical_trace_id],
         )?;
         return Ok((revision as u64, lifecycle == "reopened"));
     }

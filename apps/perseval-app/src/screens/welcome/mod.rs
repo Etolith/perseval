@@ -35,31 +35,31 @@ impl OnboardingState {
             ),
             Self::ProjectWithoutSource => (
                 "Choose how traces will arrive",
-                "This project has no trace source activity yet. Connect OTLP, import a trace file, or load the bounded local demo.",
+                "Send OTLP, import a trace file, or load the local demo.",
             ),
             Self::ReceiverDisabled => (
                 "Connect a trace source",
-                "The local OTLP receiver is disabled. Existing runs remain available and file import still works.",
+                "Turn on the local receiver in Settings, or import a trace file.",
             ),
             Self::Listening => (
                 "Waiting for the first trace",
-                "The loopback receiver is listening; send OTLP or import a bounded file.",
+                "Send an OTLP trace or import a file.",
             ),
             Self::Projecting => (
                 "First trace received",
-                "Perseval is durably journaling and projecting committed spans.",
+                "Perseval is processing the first trace.",
             ),
             Self::Analyzing => (
                 "Looking for behavior failures",
-                "The trace is queryable while deterministic analysis runs; optional feature-similarity cohorts are an explicit workspace setting.",
+                "You can inspect the trace while Perseval checks it for behavior failures.",
             ),
             Self::NoFailures => (
                 "Runs analyzed — no failure groups found",
-                "Inspect the runs, send another agent version, or adjust the source instrumentation before generating eval candidates.",
+                "Inspect the run, send another agent version, or improve its telemetry.",
             ),
             Self::Ready => (
                 "Failure groups are ready",
-                "Open Failure Inbox to inspect evidence and generate reviewable eval candidates.",
+                "Open Failure Inbox to inspect evidence and create evals.",
             ),
             Self::IngestionError => (
                 "Trace source needs attention",
@@ -353,7 +353,7 @@ impl Render for WelcomeScreen {
                     } else if self.run_count > 0 {
                         "Local demo or imported traces"
                     } else {
-                        "Import a file or use the local demo"
+                        "OTLP, file import, or local demo"
                     },
                     has_project && !has_source_activity,
                 )
@@ -379,7 +379,7 @@ impl Render for WelcomeScreen {
                 setup_step(
                     "3",
                     "Send the first trace",
-                    "Receiving → projecting → analyzing",
+                    "Receiving → analyzing",
                     has_project && has_source_activity && self.run_count == 0,
                 )
                 .child(

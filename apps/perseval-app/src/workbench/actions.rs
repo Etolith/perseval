@@ -32,6 +32,7 @@ pub enum WorkbenchAction {
     },
     ActivateEditor(EditorId),
     PinEditor(EditorId),
+    UnpinEditor(EditorId),
     CloseEditor(EditorId),
     SetPaneVisible {
         pane: PaneId,

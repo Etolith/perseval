@@ -406,11 +406,11 @@ impl FailureInbox {
                     )
                     .when(self.full_trace_mode == FullTraceMode::Tree, |bar| {
                         bar.child(
-                            button("Expand cached branches", false)
+                            button("Expand loaded branches", false)
                                 .id("expand-loaded-trace-spans")
                                 .role(Role::Button)
                                 .aria_label(
-                                    "Expand every parent already present in the bounded tree cache",
+                                    "Expand loaded parents and load their immediate children",
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.expand_all_loaded_trace_spans(cx)
