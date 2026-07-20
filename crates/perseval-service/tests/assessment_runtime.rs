@@ -123,6 +123,7 @@ fn evaluator(name: &str, hash_byte: char) -> EvaluatorReleaseSpecV1 {
         },
         projection_release_id: digest('d'),
         context_projection_release_id: digest('e'),
+        applicable_taxonomy_release_id: None,
         applicable_taxonomy_node_ids: BTreeSet::new(),
         input_bounds: EvaluationInputBoundsV1 {
             max_subjects: 1,
@@ -310,6 +311,7 @@ fn task_completion_release(
         },
         projection_release_id: projector.release_id().unwrap(),
         context_projection_release_id: context_projection.release_id().unwrap(),
+        applicable_taxonomy_release_id: None,
         applicable_taxonomy_node_ids: BTreeSet::new(),
         input_bounds: EvaluationInputBoundsV1 {
             max_subjects: 1,
@@ -926,13 +928,43 @@ fn task_completion_executor_retries_transport_and_accounts_provider_usage() {
     assert_eq!(record.cost_micros, 560);
     assert_eq!(record.provider.as_deref(), Some("openai"));
     assert_eq!(
+        record.projection_release_id.as_deref(),
+        Some(evaluator.projection_release_id.as_str())
+    );
+    assert_eq!(
+        record.context_projection_release_id.as_deref(),
+        Some(evaluator.context_projection_release_id.as_str())
+    );
+    assert_eq!(
+        record.projection_policy,
+        Some(TaskCompletionContentPolicyV1::PreRedactedSummaries)
+    );
+    assert!(record.taxonomy_release_id.is_none());
+    assert_eq!(
         record.returned_model.as_deref(),
         Some("gpt-4.1-mini-2026-06-01")
     );
     assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+    let listed = store
+        .list_trace_assessments("project-a", "trace-a", 1)
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].projection_release_id,
+        record.projection_release_id
+    );
+    assert_eq!(listed[0].projection_policy, record.projection_policy);
     let export = store.export_assessment_job(&job.job_id).unwrap();
     assert_eq!(export.status_counts.get("succeeded"), Some(&1));
     assert_eq!(export.total_cost_micros, 560);
+    assert_eq!(
+        export.items[0]
+            .assessment
+            .as_ref()
+            .unwrap()
+            .context_projection_release_id,
+        record.context_projection_release_id
+    );
 }
 
 #[test]
@@ -1116,7 +1148,10 @@ fn leases_cache_budget_and_human_activation_boundaries_are_durable() {
                 provider_enabled: true,
                 daily_budget_micros: 50,
                 per_attempt_budget_micros: 50,
-                lease_duration_ms: 5,
+                // Keep the live-lease assertion comfortably above scheduler and
+                // debug-build jitter; the test explicitly waits past this value
+                // before checking restart-style recovery below.
+                lease_duration_ms: 100,
                 maximum_attempts: 3,
                 updated_by: "human-reviewer".into(),
                 updated_at_unix_ms: 1,
@@ -1139,7 +1174,7 @@ fn leases_cache_budget_and_human_activation_boundaries_are_durable() {
             .unwrap()
             .is_none()
     );
-    thread::sleep(Duration::from_millis(8));
+    thread::sleep(Duration::from_millis(125));
     let recovered = store.claim_next_assessment("worker-b", 0).unwrap().unwrap();
     assert_eq!(recovered.item_id, first.item_id);
     assert_eq!(recovered.attempt_number, 2);
@@ -1466,6 +1501,13 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
     assert_eq!(
         quality_checks[0].evaluator.release_id().unwrap(),
         evaluator_release_id
+    );
+    assert_eq!(
+        quality_checks[0]
+            .evaluator
+            .applicable_taxonomy_release_id
+            .as_deref(),
+        Some(taxonomy_release_id.as_str())
     );
     assert_eq!(
         quality_checks[0].config.context_release_id,

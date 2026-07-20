@@ -34,6 +34,52 @@ fn decode_json_column<T: serde::de::DeserializeOwned>(
     })
 }
 
+#[derive(Debug, Clone)]
+struct AssessmentReleaseMetadata {
+    projection_release_id: String,
+    context_projection_release_id: String,
+    projection_policy: Option<TaskCompletionContentPolicyV1>,
+    taxonomy_release_id: Option<String>,
+}
+
+fn assessment_release_metadata(
+    evaluator: &EvaluatorReleaseSpecV1,
+    config: Option<&TaskCompletionReleaseConfigV1>,
+) -> AssessmentReleaseMetadata {
+    AssessmentReleaseMetadata {
+        projection_release_id: evaluator.projection_release_id.clone(),
+        context_projection_release_id: evaluator.context_projection_release_id.clone(),
+        projection_policy: config.map(|config| config.projector.content_policy),
+        taxonomy_release_id: evaluator.applicable_taxonomy_release_id.clone(),
+    }
+}
+
+fn load_assessment_release_metadata(
+    connection: &rusqlite::Connection,
+    project_id: &str,
+    evaluator_release_id: &str,
+) -> Result<AssessmentReleaseMetadata, StoreError> {
+    let (evaluator_json, config_json) = connection
+        .query_row(
+            "SELECT e.release_json, c.config_json
+             FROM evaluator_releases e
+             LEFT JOIN task_completion_release_configs c
+               ON c.project_id = e.project_id
+              AND c.evaluator_release_id = e.evaluator_release_id
+             WHERE e.project_id = ?1 AND e.evaluator_release_id = ?2",
+            params![project_id, evaluator_release_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::Invalid("assessment evaluator release is missing".into()))?;
+    let evaluator: EvaluatorReleaseSpecV1 = serde_json::from_str(&evaluator_json)?;
+    let config = config_json
+        .as_deref()
+        .map(serde_json::from_str::<TaskCompletionReleaseConfigV1>)
+        .transpose()?;
+    Ok(assessment_release_metadata(&evaluator, config.as_ref()))
+}
+
 impl WorkspaceStore {
     pub fn activate_evaluator_release(
         &self,
@@ -91,25 +137,29 @@ impl WorkspaceStore {
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if !evaluator.applicable_taxonomy_node_ids.is_empty() {
             let control = self.control.lock().expect("control store lock poisoned");
-            let active_release_id = control
-                .query_row(
-                    "SELECT taxonomy_release_id FROM taxonomy_releases
-                     WHERE project_id = ?1
-                     ORDER BY activated_at_unix_ms DESC, rowid DESC LIMIT 1",
-                    params![project_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            let Some(active_release_id) = active_release_id else {
+            let Some(applicable_release_id) = evaluator.applicable_taxonomy_release_id.as_deref()
+            else {
                 return Err(StoreError::Invalid(
-                    "quality-check applicability references taxonomy IDs, but the project has no active taxonomy release".into(),
+                    "quality-check applicability has no exact taxonomy release identity".into(),
                 ));
             };
+            let release_exists = control.query_row(
+                "SELECT EXISTS(SELECT 1 FROM taxonomy_releases
+                  WHERE project_id = ?1 AND taxonomy_release_id = ?2)",
+                params![project_id, applicable_release_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !release_exists {
+                return Err(StoreError::Invalid(
+                    "quality-check applicability taxonomy release is missing or cross-project"
+                        .into(),
+                ));
+            }
             for node_id in &evaluator.applicable_taxonomy_node_ids {
                 let exists = control.query_row(
                     "SELECT EXISTS(SELECT 1 FROM taxonomy_nodes
                       WHERE taxonomy_release_id = ?1 AND node_id = ?2)",
-                    params![active_release_id, node_id],
+                    params![applicable_release_id, node_id],
                     |row| row.get::<_, bool>(0),
                 )?;
                 if !exists {
@@ -1482,6 +1532,11 @@ impl WorkspaceStore {
         let provider = envelope.and_then(|value| value.provider.clone());
         let requested_model = envelope.map(|value| value.requested_model.clone());
         let returned_model = envelope.and_then(|value| value.returned_model.clone());
+        let release_metadata = load_assessment_release_metadata(
+            &transaction,
+            &claim.project_id,
+            &claim.evaluator_release_id,
+        )?;
         let record = AssessmentRecordV1 {
             schema_version: ASSESSMENT_RECORD_SCHEMA_VERSION.into(),
             assessment_id: assessment_id.clone(),
@@ -1493,6 +1548,10 @@ impl WorkspaceStore {
             context_binding_id: claim.context_binding_id.clone(),
             context_release_id: claim.context_release_id.clone(),
             projection_hash: claim.projection_hash.clone(),
+            projection_release_id: Some(release_metadata.projection_release_id),
+            context_projection_release_id: Some(release_metadata.context_projection_release_id),
+            projection_policy: release_metadata.projection_policy,
+            taxonomy_release_id: release_metadata.taxonomy_release_id,
             provider: provider.clone(),
             requested_model: requested_model.clone(),
             returned_model: returned_model.clone(),
@@ -1627,12 +1686,20 @@ impl WorkspaceStore {
     ) -> Result<Vec<AssessmentRecordV1>, StoreError> {
         let control = self.control.lock().expect("control store lock poisoned");
         let mut statement = control.prepare(
-            "SELECT assessment_id, item_id, evaluator_release_id, context_binding_id,
-                    context_release_id, projection_hash, provider, requested_model,
-                    returned_model, status, evaluation_json, cost_micros, latency_ms,
-                    created_at_unix_ms
-             FROM assessments WHERE project_id = ?1 AND logical_trace_id = ?2 AND revision = ?3
-             ORDER BY created_at_unix_ms DESC, assessment_id",
+            "SELECT a.assessment_id, a.item_id, a.evaluator_release_id,
+                    a.context_binding_id, a.context_release_id, a.projection_hash,
+                    a.provider, a.requested_model, a.returned_model, a.status,
+                    a.evaluation_json, a.cost_micros, a.latency_ms,
+                    a.created_at_unix_ms, e.release_json, c.config_json
+             FROM assessments a
+             JOIN evaluator_releases e
+               ON e.project_id = a.project_id
+              AND e.evaluator_release_id = a.evaluator_release_id
+             LEFT JOIN task_completion_release_configs c
+               ON c.project_id = a.project_id
+              AND c.evaluator_release_id = a.evaluator_release_id
+             WHERE a.project_id = ?1 AND a.logical_trace_id = ?2 AND a.revision = ?3
+             ORDER BY a.created_at_unix_ms DESC, a.assessment_id",
         )?;
         statement
             .query_map(
@@ -1640,6 +1707,15 @@ impl WorkspaceStore {
                 |row| {
                     let status: String = row.get(9)?;
                     let evaluation_json: Option<String> = row.get(10)?;
+                    let evaluator_json: String = row.get(14)?;
+                    let config_json: Option<String> = row.get(15)?;
+                    let evaluator: EvaluatorReleaseSpecV1 =
+                        decode_json_column(&evaluator_json, 14)?;
+                    let config = config_json
+                        .as_deref()
+                        .map(|json| decode_json_column::<TaskCompletionReleaseConfigV1>(json, 15))
+                        .transpose()?;
+                    let release_metadata = assessment_release_metadata(&evaluator, config.as_ref());
                     Ok(AssessmentRecordV1 {
                         schema_version: ASSESSMENT_RECORD_SCHEMA_VERSION.into(),
                         assessment_id: row.get(0)?,
@@ -1651,6 +1727,12 @@ impl WorkspaceStore {
                         context_binding_id: row.get(3)?,
                         context_release_id: row.get(4)?,
                         projection_hash: row.get(5)?,
+                        projection_release_id: Some(release_metadata.projection_release_id),
+                        context_projection_release_id: Some(
+                            release_metadata.context_projection_release_id,
+                        ),
+                        projection_policy: release_metadata.projection_policy,
+                        taxonomy_release_id: release_metadata.taxonomy_release_id,
                         provider: row.get(6)?,
                         requested_model: row.get(7)?,
                         returned_model: row.get(8)?,
@@ -1689,6 +1771,11 @@ impl WorkspaceStore {
         let transaction = control.transaction()?;
         let job = load_job(&transaction, job_id)?
             .ok_or_else(|| StoreError::Invalid("assessment job not found".into()))?;
+        let release_metadata = load_assessment_release_metadata(
+            &transaction,
+            &job.project_id,
+            &job.evaluator_release_id,
+        )?;
         let mut statement = transaction.prepare(
             "SELECT i.item_id, i.logical_trace_id, i.revision, i.context_binding_id,
                     i.context_release_id, i.projection_hash, i.status, i.attempt_count,
@@ -1721,6 +1808,14 @@ impl WorkspaceStore {
                                 context_binding_id: row.get(3)?,
                                 context_release_id: row.get(4)?,
                                 projection_hash: row.get(5)?,
+                                projection_release_id: Some(
+                                    release_metadata.projection_release_id.clone(),
+                                ),
+                                context_projection_release_id: Some(
+                                    release_metadata.context_projection_release_id.clone(),
+                                ),
+                                projection_policy: release_metadata.projection_policy,
+                                taxonomy_release_id: release_metadata.taxonomy_release_id.clone(),
                                 provider: row.get(10)?,
                                 requested_model: row.get(11)?,
                                 returned_model: row.get(12)?,

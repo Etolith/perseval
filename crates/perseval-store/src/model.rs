@@ -1389,6 +1389,22 @@ pub struct AssessmentRecordV1 {
     pub context_binding_id: String,
     pub context_release_id: Option<String>,
     pub projection_hash: String,
+    /// Immutable projector contract used to produce `projection_hash`.
+    /// Optional only so records cached before PV-02 remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_release_id: Option<String>,
+    /// Immutable declared-context projection contract used by the evaluator.
+    /// Optional for evaluator families that do not consume declared context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_projection_release_id: Option<String>,
+    /// Outbound-content class used for this task-completion projection.
+    /// This is intentionally distinct from project policy and provider state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_policy: Option<traces_to_evals::TaskCompletionContentPolicyV1>,
+    /// Exact taxonomy release governing evaluator applicability, when scoped.
+    /// Reviewed category assignments remain separate immutable artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taxonomy_release_id: Option<String>,
     pub provider: Option<String>,
     pub requested_model: Option<String>,
     pub returned_model: Option<String>,

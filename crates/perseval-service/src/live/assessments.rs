@@ -85,6 +85,20 @@ impl LiveTraceService {
             }
         };
         let included_field_ids = task_completion_context_field_ids(&context, projection_class);
+        let applicable_taxonomy_release_id = if draft.applicable_taxonomy_node_ids.is_empty() {
+            None
+        } else {
+            self.store
+                .taxonomy_governance_summary(project_id)?
+                .latest_release_id
+                .ok_or_else(|| {
+                    LiveServiceError::InvalidInput(
+                        "stable taxonomy applicability requires an active immutable taxonomy release"
+                            .into(),
+                    )
+                })?
+                .into()
+        };
         let context_projection = ContextProjectionV1 {
             context_release_id: draft.context_release_id.clone(),
             projection_class,
@@ -118,6 +132,7 @@ impl LiveTraceService {
             context_projection_release_id: context_projection
                 .release_id()
                 .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?,
+            applicable_taxonomy_release_id,
             applicable_taxonomy_node_ids: draft.applicable_taxonomy_node_ids.clone(),
             input_bounds: EvaluationInputBoundsV1 {
                 max_subjects: 1,

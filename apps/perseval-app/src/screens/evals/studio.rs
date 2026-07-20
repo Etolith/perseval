@@ -647,8 +647,14 @@ impl QualityCheckStudio {
                 .child(detail_row(
                     "Applicability",
                     &format!(
-                        "{} stable task/capability/policy definition(s)",
-                        check.evaluator.applicable_taxonomy_node_ids.len()
+                        "{} stable task/capability/policy definition(s) · taxonomy release {}",
+                        check.evaluator.applicable_taxonomy_node_ids.len(),
+                        check
+                            .evaluator
+                            .applicable_taxonomy_release_id
+                            .as_deref()
+                            .map(short_id)
+                            .unwrap_or("global")
                     ),
                 ))
                 .child(
