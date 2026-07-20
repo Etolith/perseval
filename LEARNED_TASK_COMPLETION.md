@@ -40,7 +40,7 @@ Use **Review Queue** in one of two modes:
 
 - **Blind calibration** hides automated output and peer answers until the
   reviewer submits a label, rationale, and evidence. Cases are split by stable
-  leakage group so related revisions cannot cross fit, calibration, and held-out
+  leakage group so related revisions cannot cross the fit, calibration, and held-out
   test partitions.
 - **Visible triage** reveals the automated result for investigation. It is
   deliberately excluded from agreement, calibration fitting, and held-out
@@ -62,8 +62,8 @@ risk/coverage, and available slices.
 Activating a threshold policy materializes a new immutable decision for each
 eligible assessment. It does not edit the provider's score, the assessment, or
 the human answer. Automation remains blocked until every displayed gate passes,
-including minimum label counts, class support, reviewer agreement, flagged-
-failure precision, and auto-pass negative predictive value.
+including minimum label counts, class support, reviewer agreement,
+flagged-failure precision, and auto-pass negative predictive value.
 
 ## Privacy and trust boundaries
 

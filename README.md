@@ -84,7 +84,7 @@ explicit human approval.
 
 Run a versioned Task Completion review over finalized trace revisions without
 turning model output into a deterministic finding. The native **Evals**
-workspace separates the quality-check definition, bounded backfill preview,
+workspace separates the quality check definition, bounded backfill preview,
 provider execution, human review, and calibration policy so each artifact keeps
 its own immutable provenance.
 
