@@ -1419,6 +1419,10 @@ pub struct AssessmentRecordV1 {
 pub struct AssessmentJobItemExportV1 {
     pub item_id: String,
     pub logical_trace_id: String,
+    /// Ingestion source namespace needed to disambiguate external identities.
+    pub source_id: String,
+    /// Stable source trace identity used by independent scorers and exports.
+    pub external_trace_id: String,
     pub revision: u64,
     pub context_binding_id: String,
     pub context_release_id: Option<String>,

@@ -23,9 +23,10 @@ use traces_to_evals::{
     ContextFieldV1, ContextProjectionClassV1, ContextProjectionV1, ContextReviewStateV1,
     ContextSensitivityV1, EvaluationImplementationV1, EvaluationInputBoundsV1,
     EvaluationTargetKind, EvaluatorReleaseSpecV1, IdempotencyClassV1, LearnedTaskKind,
-    SuccessCriterionImportanceV1, SuccessCriterionV1, TaskCompletionContentPolicyV1,
-    TaskCompletionProjectorV1, TaxonomyDimensionV1, TaxonomyLineageOperationV1,
-    TaxonomyNodeStateV1, TaxonomyNodeV1, task_completion_judgment_response_schema,
+    SuccessCriterionImportanceV1, SuccessCriterionV1, TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2,
+    TaskCompletionContentPolicyV1, TaskCompletionProjectorV1, TaxonomyDimensionV1,
+    TaxonomyLineageOperationV1, TaxonomyNodeStateV1, TaxonomyNodeV1,
+    task_completion_judgment_response_schema,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +120,7 @@ impl LiveTraceService {
             implementation: EvaluationImplementationV1::PromptJudge {
                 provider: "openai".into(),
                 requested_model: draft.requested_model.trim().into(),
-                system_prompt: "Judge task completion only from the declared success criteria and cited observed trace evidence. Never infer success from a deterministic finding, tool name, or missing evidence.".into(),
+                system_prompt: TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2.into(),
                 rubric: draft.review_criteria.trim().into(),
                 response_schema: task_completion_judgment_response_schema(),
                 decoding_parameters: BTreeMap::new(),

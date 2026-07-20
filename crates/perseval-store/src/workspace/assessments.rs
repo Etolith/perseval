@@ -16,8 +16,8 @@ use traces_to_evals::{
     EvaluationImplementationV1, EvaluationTargetKind, EvaluatorReleaseSpecV1,
     LearnedAbstentionReasonV1, LearnedTaskKind, LearnedVerdictV1,
     TASK_COMPLETION_PROJECTION_SCHEMA_VERSION, TRACE_CONTEXT_BINDING_SCHEMA_VERSION,
-    TaskCompletionContentPolicyV1, TaskCompletionProjectionV1, TraceContextBindingProvenanceV1,
-    TraceContextBindingResolutionV1, TraceContextBindingV1,
+    TaskCompletionContentPolicyV1, TaskCompletionProjectionV1, TaskCompletionProjectorV1,
+    TraceContextBindingProvenanceV1, TraceContextBindingResolutionV1, TraceContextBindingV1,
     task_completion_judgment_response_schema,
 };
 
@@ -450,6 +450,79 @@ impl WorkspaceStore {
             .map_err(StoreError::from)
     }
 
+    fn load_task_completion_trace(
+        &self,
+        logical_trace_id: &str,
+        revision: u64,
+        projector: &TaskCompletionProjectorV1,
+    ) -> Result<Trace, StoreError> {
+        let mut trace = self.load_analysis_trace(logical_trace_id, revision)?;
+        if projector.content_policy != TaskCompletionContentPolicyV1::PreRedactedSummaries {
+            return Ok(trace);
+        }
+
+        for span in &mut trace.spans {
+            span.input = self.authorized_payload_summary(
+                &span.payload_identities,
+                &[
+                    "input.value",
+                    "input",
+                    "traceeval.tool.invocation",
+                    "gen_ai.tool.call.arguments",
+                    "tool.arguments",
+                ],
+                projector.max_summary_bytes,
+            )?;
+            span.output = self.authorized_payload_summary(
+                &span.payload_identities,
+                &[
+                    "output.value",
+                    "output",
+                    "traceeval.tool.result",
+                    "gen_ai.tool.call.result",
+                    "tool.result",
+                ],
+                projector.max_summary_bytes,
+            )?;
+        }
+        Ok(trace)
+    }
+
+    fn authorized_payload_summary(
+        &self,
+        identities: &BTreeMap<String, PayloadIdentity>,
+        preferred_keys: &[&str],
+        maximum_summary_bytes: u32,
+    ) -> Result<Option<String>, StoreError> {
+        let identity = preferred_keys.iter().find_map(|preferred| {
+            identities
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(preferred))
+                .map(|(_, identity)| identity)
+        });
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        let Some(blob_id) = identity.blob_id.as_deref() else {
+            return Ok(None);
+        };
+        let hydration_limit = usize::try_from(maximum_summary_bytes)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(16)
+            .clamp(4_096, 65_536);
+        let original_bytes = usize::try_from(identity.original_bytes).unwrap_or(usize::MAX);
+        if original_bytes > hydration_limit {
+            return Ok(None);
+        }
+        let encoded = self.reveal_blob(blob_id, original_bytes.saturating_add(1))?;
+        let value: Value = serde_json::from_slice(&encoded)?;
+        match value {
+            Value::Null => Ok(None),
+            Value::String(value) => Ok((!value.is_empty()).then_some(value)),
+            value => Ok(Some(serde_json::to_string(&value)?)),
+        }
+    }
+
     pub fn set_project_assessment_policy(
         &self,
         policy: &ProjectAssessmentPolicyV1,
@@ -573,7 +646,11 @@ impl WorkspaceStore {
                         )
                     })?,
                 _ => {
-                    let trace = self.load_analysis_trace(logical_trace_id, *revision)?;
+                    let trace = self.load_task_completion_trace(
+                        logical_trace_id,
+                        *revision,
+                        &config.projector,
+                    )?;
                     let projection = config
                         .projector
                         .project(
@@ -589,7 +666,8 @@ impl WorkspaceStore {
                     continue;
                 }
             };
-            let trace = self.load_analysis_trace(logical_trace_id, *revision)?;
+            let trace =
+                self.load_task_completion_trace(logical_trace_id, *revision, &config.projector)?;
             let projection = config
                 .projector
                 .project(
@@ -1782,14 +1860,18 @@ impl WorkspaceStore {
                     i.terminal_reason,
                     a.assessment_id, a.provider, a.requested_model, a.returned_model,
                     a.status, a.evaluation_json, a.cost_micros, a.latency_ms,
-                    a.created_at_unix_ms
+                    a.created_at_unix_ms, t.source_id, t.external_trace_id
              FROM assessment_job_items i
              LEFT JOIN assessments a ON a.item_id = i.item_id
+             JOIN logical_traces t
+               ON t.workspace_id = ?2
+              AND t.project_id = i.project_id
+              AND t.logical_trace_id = i.logical_trace_id
              WHERE i.job_id = ?1
              ORDER BY i.logical_trace_id, i.revision, i.item_id",
         )?;
         let items = statement
-            .query_map(params![job_id], |row| {
+            .query_map(params![job_id, self.workspace_id], |row| {
                 let item_status: String = row.get(6)?;
                 let assessment_id: Option<String> = row.get(9)?;
                 let assessment = assessment_id
@@ -1849,6 +1931,8 @@ impl WorkspaceStore {
                 Ok(AssessmentJobItemExportV1 {
                     item_id: row.get(0)?,
                     logical_trace_id: row.get(1)?,
+                    source_id: row.get(18)?,
+                    external_trace_id: row.get(19)?,
                     revision: row.get::<_, i64>(2)? as u64,
                     context_binding_id: row.get(3)?,
                     context_release_id: row.get(4)?,
