@@ -176,6 +176,7 @@ pub(crate) struct FailureInbox {
     full_trace_end_unix_nano: u64,
     focused_span_id: Option<String>,
     focused_span_snapshot: Option<SpanRow>,
+    focused_review_evidence: Option<(String, String)>,
     group_details_open: bool,
     investigation_actions_open: bool,
     finding_review_open: bool,
@@ -273,6 +274,7 @@ impl FailureInbox {
             full_trace_end_unix_nano: 1,
             focused_span_id: None,
             focused_span_snapshot: None,
+            focused_review_evidence: None,
             group_details_open: false,
             investigation_actions_open: false,
             finding_review_open: false,
@@ -600,6 +602,7 @@ impl FailureInbox {
     }
 
     fn focus_evidence_span(&mut self, span_id: String, cx: &mut Context<Self>) {
+        self.focused_review_evidence = None;
         self.focused_span_snapshot = self.evidence.as_ref().and_then(|evidence| {
             evidence
                 .spans
@@ -615,6 +618,7 @@ impl FailureInbox {
 
     fn focus_full_trace_span(&mut self, span: SpanRow, cx: &mut Context<Self>) {
         let span_id = span.span_id.clone();
+        self.focused_review_evidence = None;
         self.focused_span_id = Some(span_id.clone());
         cx.emit(FailureInboxEvent::FullTraceSelectionChanged {
             span_id: span_id.clone(),
@@ -650,10 +654,16 @@ impl FailureInbox {
         .detach();
     }
 
-    fn focus_assessment_evidence_span(&mut self, span_id: String, cx: &mut Context<Self>) {
+    fn focus_assessment_evidence_span(
+        &mut self,
+        span_id: String,
+        evidence_label: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some((trace_id, revision)) = self.full_trace_identity.clone() else {
             return;
         };
+        self.focused_review_evidence = Some((span_id.clone(), evidence_label));
         self.focused_span_id = Some(span_id.clone());
         self.focused_span_snapshot = None;
         self.tab = InspectorTab::Span;
@@ -793,6 +803,7 @@ impl FailureInbox {
         selected_span_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.focused_review_evidence = None;
         match &origin {
             FullTraceOrigin::Runs => {
                 self.evidence = None;

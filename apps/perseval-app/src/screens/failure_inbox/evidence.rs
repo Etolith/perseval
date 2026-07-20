@@ -1125,6 +1125,11 @@ impl FailureInbox {
                     for (evidence_index, citation) in evaluation.evidence.iter().enumerate() {
                         if let Some(span_id) = review_evidence_span_id(&citation.location) {
                             let span_id = span_id.to_string();
+                            let evidence_label = format!(
+                                "{} ({})",
+                                citation.evidence_key,
+                                review_evidence_location_label(&citation.location)
+                            );
                             card = card.child(
                                 button(
                                     &format!(
@@ -1145,7 +1150,11 @@ impl FailureInbox {
                                 ))
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
-                                        this.focus_assessment_evidence_span(span_id.clone(), cx)
+                                        this.focus_assessment_evidence_span(
+                                            span_id.clone(),
+                                            evidence_label.clone(),
+                                            cx,
+                                        )
                                     },
                                 )),
                             );
@@ -1195,8 +1204,16 @@ impl FailureInbox {
                 .focused_span_snapshot
                 .as_ref()
                 .map(|span| {
+                    let review_evidence = self
+                        .focused_review_evidence
+                        .as_ref()
+                        .filter(|(span_id, _)| span_id == &span.span_id)
+                        .map(|(_, label)| {
+                            format!("AUTOMATED REVIEW EVIDENCE\n{label}\n\n")
+                        })
+                        .unwrap_or_default();
                     format!(
-                        "{}\n{}\nstatus {} · {} ns\nparent {}\n\nevents ({})\n{}\n\nlinks ({})\n{}",
+                        "{review_evidence}{}\n{}\nstatus {} · {} ns\nparent {}\n\nevents ({})\n{}\n\nlinks ({})\n{}",
                         span.name,
                         span.category,
                         span.status_code,
@@ -1568,6 +1585,26 @@ fn review_evidence_span_id(
         | SpanAttribute { span_id, .. }
         | Segment { span_id, .. } => Some(span_id),
         TraceAttribute { .. } => None,
+    }
+}
+
+fn review_evidence_location_label(
+    location: &perseval_service::analysis::EvaluationEvidenceLocationV1,
+) -> String {
+    use perseval_service::analysis::EvaluationEvidenceLocationV1::*;
+    match location {
+        Span { span_id } => format!("span {span_id}"),
+        Event { span_id, event_id } => format!("event {event_id} on span {span_id}"),
+        TraceAttribute { attribute_path } => format!("trace field {attribute_path}"),
+        SpanAttribute {
+            span_id,
+            attribute_path,
+        } => format!("field {attribute_path} on span {span_id}"),
+        Segment {
+            span_id,
+            start_byte,
+            end_byte,
+        } => format!("bytes {start_byte}–{end_byte} on span {span_id}"),
     }
 }
 

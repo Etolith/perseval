@@ -28,6 +28,8 @@ pub(crate) struct HumanReviewScreen {
     mode: ReviewModeV1,
     tasks: Vec<ReviewTaskV1>,
     selected_task_id: Option<String>,
+    blind_selected_task_id: Option<String>,
+    visible_selected_task_id: Option<String>,
     presentation: Option<ReviewTaskPresentationV1>,
     adjudication: Option<ReviewAdjudicationPacketV1>,
     label: Option<AnnotationLabelV1>,
@@ -54,6 +56,8 @@ impl HumanReviewScreen {
             mode: ReviewModeV1::BlindCalibration,
             tasks: Vec::new(),
             selected_task_id: None,
+            blind_selected_task_id: None,
+            visible_selected_task_id: None,
             presentation: None,
             adjudication: None,
             label: None,
@@ -74,6 +78,8 @@ impl HumanReviewScreen {
         }
         self.project_id = project_id;
         self.selected_task_id = None;
+        self.blind_selected_task_id = None;
+        self.visible_selected_task_id = None;
         self.presentation = None;
         self.adjudication = None;
         self.reload(cx);
@@ -83,8 +89,19 @@ impl HumanReviewScreen {
         if self.mode == mode {
             return;
         }
+        match self.mode {
+            ReviewModeV1::BlindCalibration => {
+                self.blind_selected_task_id = self.selected_task_id.clone()
+            }
+            ReviewModeV1::VisibleTriage => {
+                self.visible_selected_task_id = self.selected_task_id.clone()
+            }
+        }
         self.mode = mode;
-        self.selected_task_id = None;
+        self.selected_task_id = match mode {
+            ReviewModeV1::BlindCalibration => self.blind_selected_task_id.clone(),
+            ReviewModeV1::VisibleTriage => self.visible_selected_task_id.clone(),
+        };
         self.presentation = None;
         self.adjudication = None;
         self.reload(cx);
@@ -112,7 +129,16 @@ impl HumanReviewScreen {
                 }
                 this.busy = false;
                 match result {
-                    Ok(tasks) => this.tasks = tasks,
+                    Ok(tasks) => {
+                        this.tasks = tasks;
+                        if let Some(index) = this.selected_task_id.as_deref().and_then(|task_id| {
+                            this.tasks.iter().position(|task| task.task_id == task_id)
+                        }) {
+                            this.select_task(index, cx);
+                        } else {
+                            this.selected_task_id = None;
+                        }
+                    }
                     Err(error) => this.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -128,7 +154,11 @@ impl HumanReviewScreen {
         };
         let task_id = task.task_id.clone();
         let adjudicating = task.status == ReviewTaskStatusV1::AwaitingAdjudication;
-        self.selected_task_id = Some(task_id);
+        self.selected_task_id = Some(task_id.clone());
+        match self.mode {
+            ReviewModeV1::BlindCalibration => self.blind_selected_task_id = Some(task_id),
+            ReviewModeV1::VisibleTriage => self.visible_selected_task_id = Some(task_id),
+        }
         self.presentation = None;
         self.adjudication = None;
         self.label = None;
@@ -407,6 +437,17 @@ impl HumanReviewScreen {
                         div()
                             .id(("human-review-task", index))
                             .role(Role::Button)
+                            .aria_label(format!(
+                                "Review trace {} revision {}; {}; {}; {} reviewers; {}",
+                                task.logical_trace_id,
+                                task.revision,
+                                split_label(task),
+                                selection_label(task),
+                                task.required_reviewers,
+                                status_label(task.status)
+                            ))
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_2().border_color(Theme::FOCUS_RING))
                             .cursor_pointer()
                             .px_3()
                             .py_3()
@@ -477,6 +518,8 @@ impl HumanReviewScreen {
                     div().p_3().border_t_1().border_color(Theme::BORDER).child(
                         button_state("Resume baseline queue", false, !self.busy)
                             .id("resume-human-review-queue")
+                            .role(Role::Button)
+                            .aria_label("Resume blind calibration queue")
                             .on_click(cx.listener(|this, _, _, cx| this.create_queue(cx))),
                     ),
                 )
@@ -515,6 +558,8 @@ impl HumanReviewScreen {
                     .child(
                         button_state("Create blind review queue", true, !self.busy)
                             .id("create-human-review-queue")
+                            .role(Role::Button)
+                            .aria_label("Create blind calibration review queue")
                             .mt_4()
                             .on_click(cx.listener(|this, _, _, cx| this.create_queue(cx))),
                     )
@@ -526,7 +571,7 @@ impl HumanReviewScreen {
                             .max_w(px(520.))
                             .text_center()
                             .child(
-                                "Visible triage is deliberately excluded from calibration and agreement. Manual and active-selection cases will appear here when their source workflow adds them.",
+                                "Visible triage is deliberately excluded from calibration and agreement. Operator-opened cases appear here. Uncertainty-selected blind cases stay in Blind calibration and remain separate from the random-audit population.",
                             ),
                     )
                 })
@@ -572,6 +617,8 @@ impl HumanReviewScreen {
                     .child(
                         button_state("Open exact trace", false, !self.busy)
                             .id("open-human-review-trace")
+                            .role(Role::Button)
+                            .aria_label("Open the exact frozen trace revision for this case")
                             .on_click(cx.listener(|this, _, _, cx| this.open_trace(cx))),
                     ),
             );
@@ -639,6 +686,8 @@ impl HumanReviewScreen {
                     .child("Claiming binds this case to your reviewer identity. Another independent reviewer must use a different identity."))
                 .child(button_state(if mode_blind { "Claim blind review" } else { "Claim triage case" }, true, !self.busy)
                     .id("claim-human-review")
+                    .role(Role::Button)
+                    .aria_label(if mode_blind { "Claim blind review" } else { "Claim visible triage case" })
                     .mt_4()
                     .on_click(cx.listener(|this, _, _, cx| this.claim(cx))))).into_any_element();
         }
@@ -716,6 +765,8 @@ impl HumanReviewScreen {
                         .map(|label| {
                             button_state(label_name(label), self.label == Some(label), !self.busy)
                                 .id(("human-answer-label", label_ordinal(label)))
+                                .role(Role::Button)
+                                .aria_label(format!("Answer {}", label_name(label)))
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.choose_label(label, cx)),
                                 )
@@ -755,8 +806,11 @@ impl HumanReviewScreen {
                             .map(|(index, key)| {
                                 let selected = self.evidence_keys.iter().any(|value| value == key);
                                 let key = key.clone();
-                                button_state(short_id(&key), selected, !self.busy)
+                                let evidence_label = evidence_key_label(&key);
+                                button_state(&evidence_label, selected, !self.busy)
                                     .id(("review-evidence", index))
+                                    .role(Role::Button)
+                                    .aria_label(format!("Select evidence {evidence_label}"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.toggle_evidence(&key, cx)
                                     }))
@@ -866,6 +920,16 @@ impl HumanReviewScreen {
                             enabled,
                         )
                         .id("submit-human-answer")
+                        .role(Role::Button)
+                        .aria_label(if adjudicating {
+                            "Submit adjudication"
+                        } else if blind_answer_locked {
+                            "Answer locked after automated output reveal"
+                        } else if latest.is_some() {
+                            "Save review correction"
+                        } else {
+                            "Submit independent human answer"
+                        })
                         .when(enabled, |button| {
                             button.on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                         }),
@@ -913,6 +977,8 @@ impl Render for HumanReviewScreen {
                             !self.busy,
                         )
                         .id("review-mode-blind")
+                        .role(Role::Button)
+                        .aria_label("Blind calibration; automated output and peer answers remain sealed until submission")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_mode(ReviewModeV1::BlindCalibration, cx)
                         })),
@@ -924,6 +990,8 @@ impl Render for HumanReviewScreen {
                             !self.busy,
                         )
                         .id("review-mode-visible")
+                        .role(Role::Button)
+                        .aria_label("Visible triage; excluded from calibration and agreement")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_mode(ReviewModeV1::VisibleTriage, cx)
                         })),
@@ -952,6 +1020,27 @@ fn presentation_evidence_keys(presentation: &ReviewTaskPresentationV1) -> &[Stri
         ReviewTaskPresentationV1::Blind(view) => &view.evidence_keys,
         ReviewTaskPresentationV1::Revealed(view) => &view.evidence_keys,
     }
+}
+
+fn evidence_key_label(key: &str) -> String {
+    if let Some(span_id) = key.strip_prefix("span:") {
+        return format!("Trace span {}", short_id(span_id));
+    }
+    if let Some(index) = key.strip_prefix("terminal-output:") {
+        return index
+            .parse::<usize>()
+            .map(|index| format!("Terminal output {}", index + 1))
+            .unwrap_or_else(|_| "Terminal output".into());
+    }
+    if let Some(tool_call) = key.strip_prefix("tool-call:") {
+        return format!("Tool call {}", short_id(tool_call));
+    }
+    key.chars()
+        .map(|character| match character {
+            ':' | '-' | '_' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 fn presentation_schema(

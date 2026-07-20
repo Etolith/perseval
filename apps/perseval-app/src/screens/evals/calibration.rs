@@ -20,6 +20,12 @@ enum MetricView {
     RiskCoverage,
 }
 
+struct AutomationGateItem {
+    label: &'static str,
+    current: String,
+    passed: bool,
+}
+
 pub(crate) struct CalibrationScreen {
     service: Arc<LiveTraceService>,
     project_id: Option<String>,
@@ -388,6 +394,14 @@ impl CalibrationScreen {
                     div()
                         .id(("calibration-release", index))
                         .role(Role::Button)
+                        .aria_label(format!(
+                            "Open calibration release {}; {} fitted answers; {} reviewers",
+                            short_id(id),
+                            release.fit_annotation_revision_ids.len(),
+                            release.agreement_report.rater_count
+                        ))
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_2().border_color(Theme::FOCUS_RING))
                         .cursor_pointer()
                         .px_3()
                         .py_3()
@@ -445,6 +459,8 @@ impl CalibrationScreen {
                 .child(
                     button_state("Fit reviewed answers", true, !self.busy)
                         .id("fit-review-calibration")
+                        .role(Role::Button)
+                        .aria_label("Fit a calibration release from resolved blind reviews")
                         .mt_4()
                         .on_click(cx.listener(|this, _, _, cx| this.fit_calibration(cx))),
                 )
@@ -688,7 +704,14 @@ impl CalibrationScreen {
                                     )),
                             ),
                     )
-                    .child(tag(&release.fit_report.positive_class, Theme::AMBER)),
+                    .child(tag(
+                        &format!("Positive class: {}", release.fit_report.positive_class),
+                        Theme::AMBER,
+                    )),
+            )
+            .when_some(
+                self.render_automation_gate_summary(release),
+                |workbench, summary| workbench.child(summary),
             )
             .child(
                 div().mt_5().flex().flex_wrap().gap_2().children(
@@ -702,6 +725,8 @@ impl CalibrationScreen {
                     .map(|(view, label)| {
                         button_state(label, self.metric_view == view, !self.busy)
                             .id(("calibration-metric-view", metric_view_ordinal(view)))
+                            .role(Role::Button)
+                            .aria_label(format!("Show {label} metrics"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.metric_view = view;
                                 cx.notify();
@@ -713,6 +738,171 @@ impl CalibrationScreen {
             .child(self.render_slice_performance())
             .child(self.render_threshold_policy(cx))
             .into_any_element()
+    }
+
+    fn automation_gate_items(
+        &self,
+        release: &CalibrationReleaseV1,
+    ) -> Option<Vec<AutomationGateItem>> {
+        let held_out = self.reports.first()?;
+        let fit = random_audit_report(&release.fit_slice_reports)?;
+        let test = random_audit_report(&held_out.slice_reports)?;
+        let label_count = fit.attempted_count.saturating_add(test.attempted_count);
+        let positive_count = fit
+            .confusion
+            .true_positive
+            .saturating_add(fit.confusion.false_negative)
+            .saturating_add(test.confusion.true_positive)
+            .saturating_add(test.confusion.false_negative);
+        let negative_count = fit
+            .confusion
+            .true_negative
+            .saturating_add(fit.confusion.false_positive)
+            .saturating_add(test.confusion.true_negative)
+            .saturating_add(test.confusion.false_positive);
+        let decision_coverage = if test.attempted_count == 0 {
+            0.0
+        } else {
+            test.decided_count as f64 / test.attempted_count as f64
+        };
+        let grouped_lower = test
+            .macro_f1_interval
+            .as_ref()
+            .map(|interval| interval.lower_95);
+        let quality_passed = automation_quality_metrics_sufficient(test);
+        Some(vec![
+            AutomationGateItem {
+                label: "Unbiased random labels",
+                current: format!("{label_count} / 500"),
+                passed: label_count >= 500,
+            },
+            AutomationGateItem {
+                label: "Each important class",
+                current: format!("{positive_count}/100 failure · {negative_count}/100 non-failure"),
+                passed: positive_count >= 100 && negative_count >= 100,
+            },
+            AutomationGateItem {
+                label: "Held-out coverage",
+                current: format!("{:.1}% / 90%", decision_coverage * 100.0),
+                passed: decision_coverage >= 0.90,
+            },
+            AutomationGateItem {
+                label: "Grouped confidence",
+                current: grouped_lower.map_or_else(
+                    || "not available / >0.053".into(),
+                    |lower| format!("{lower:.3} / >0.053"),
+                ),
+                passed: grouped_lower.is_some_and(|lower| lower > 0.053),
+            },
+            AutomationGateItem {
+                label: "Quality and calibration",
+                current: format!(
+                    "macro F1 {} · MCC {} · AP {} · Brier {} · ECE {}",
+                    format_optional(test.macro_f1),
+                    format_optional(test.matthews_correlation),
+                    format_optional(test.average_precision),
+                    format_optional(test.brier_score),
+                    format_optional(test.expected_calibration_error),
+                ),
+                passed: quality_passed,
+            },
+        ])
+    }
+
+    fn render_automation_gate_summary(&self, release: &CalibrationReleaseV1) -> Option<AnyElement> {
+        let items = self.automation_gate_items(release)?;
+        let passed = items.iter().filter(|item| item.passed).count();
+        let ready = passed == items.len();
+        let accessible_summary = items
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}: {}, {}",
+                    item.label,
+                    item.current,
+                    if item.passed { "passed" } else { "blocked" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(
+            div()
+                .id("automation-safety-gate-summary")
+                .mt_4()
+                .p_4()
+                .rounded_sm()
+                .border_1()
+                .border_color(if ready { Theme::GREEN } else { Theme::AMBER })
+                .bg(if ready {
+                    Theme::SUCCESS_SURFACE
+                } else {
+                    Theme::WARNING_SURFACE
+                })
+                .role(Role::Alert)
+                .aria_label(format!(
+                    "Automation {}. {passed} of {} safety gates pass. {accessible_summary}",
+                    if ready { "ready" } else { "blocked" },
+                    items.len()
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(if ready {
+                                    "Automation ready"
+                                } else {
+                                    "Automation blocked"
+                                }),
+                        )
+                        .child(tag(
+                            &format!("{passed}/{} gates pass", items.len()),
+                            if ready { Theme::GREEN } else { Theme::AMBER },
+                        )),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(items.into_iter().map(|item| {
+                            div()
+                                .min_w(px(180.))
+                                .flex_1()
+                                .p_3()
+                                .rounded_sm()
+                                .bg(Theme::PANEL_SURFACE)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(if item.passed {
+                                            Theme::GREEN
+                                        } else {
+                                            Theme::AMBER
+                                        })
+                                        .child(format!(
+                                            "{} · {}",
+                                            if item.passed { "PASS" } else { "BLOCKED" },
+                                            item.label
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .text_xs()
+                                        .text_color(Theme::MUTED)
+                                        .child(item.current),
+                                )
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_slice_performance(&self) -> Div {
@@ -826,21 +1016,29 @@ impl CalibrationScreen {
             .when_some(self.error.clone(), |section, error| section.child(div().mt_3().p_3().rounded_sm().bg(Theme::DANGER_SURFACE).text_sm().text_color(Theme::RED).child(error)))
             .when_some(self.notice.clone(), |section, notice| section.child(div().mt_3().p_3().rounded_sm().bg(Theme::SUCCESS_SURFACE).text_sm().text_color(Theme::GREEN).child(notice)))
             .when(self.held_out_report().is_some() && !automation_ready, |section| section.child(
-                div().mt_3().p_3().rounded_sm().bg(Theme::WARNING_SURFACE).text_sm().text_color(Theme::AMBER)
+                div().id("automation-safety-gate-warning").mt_3().p_3().rounded_sm().bg(Theme::WARNING_SURFACE).text_sm().text_color(Theme::AMBER)
+                    .role(Role::Alert)
+                    .aria_label("Automation activation is blocked. The safety-gate checklist above shows current values and failed requirements.")
                     .child("Exploratory report only. Activation requires an unbiased random-audit cohort with at least 500 resolved labels, 100 examples in each class, 90% held-out decision coverage, and a grouped-confidence bound above the baselines."),
             ))
             .child(div().mt_4().flex().gap_2()
                 .child(button_state("1 · Freeze threshold policy", true, !self.busy && self.proposed_policy.is_none() && self.held_out_report().is_none() && self.selected_release().is_some_and(|(_, release)| agreement_is_sufficient(release)))
                     .id("create-threshold-policy")
+                    .role(Role::Button)
+                    .aria_label("Step 1: freeze an immutable threshold policy")
                     .on_click(cx.listener(|this, _, _, cx| this.create_policy(cx))))
                 .when(self.proposed_policy.is_some() && self.held_out_report().is_none(), |actions| actions.child(
                     button_state("2 · Evaluate held-out test once", false, !self.busy)
                         .id("evaluate-held-out")
+                        .role(Role::Button)
+                        .aria_label("Step 2: evaluate the held-out test exactly once")
                         .on_click(cx.listener(|this, _, _, cx| this.evaluate_held_out(cx)))
                 ))
                 .when(self.proposed_policy.is_some() && self.held_out_report().is_some(), |actions| actions.child(
                     button_state("3 · Activate reviewed policy", false, !self.busy && automation_ready)
                         .id("activate-threshold-policy")
+                        .role(Role::Button)
+                        .aria_label(if automation_ready { "Step 3: activate the reviewed automation policy" } else { "Step 3 blocked: automation safety gates have not passed" })
                         .when(automation_ready, |button| button.on_click(cx.listener(|this, _, _, cx| this.activate_policy(cx))))
                 )))
     }
@@ -882,12 +1080,9 @@ fn automation_population_sufficient(
     label_count >= 500 && positive_count >= 100 && negative_count >= 100
 }
 
-fn automation_quality_sufficient(report: &perseval_service::BinaryCalibrationReportV1) -> bool {
-    let decision_coverage = if report.attempted_count == 0 {
-        0.0
-    } else {
-        report.decided_count as f64 / report.attempted_count as f64
-    };
+fn automation_quality_metrics_sufficient(
+    report: &perseval_service::BinaryCalibrationReportV1,
+) -> bool {
     report.average_precision.is_some_and(|value| value >= 0.65)
         && report.macro_f1.is_some_and(|value| value >= 0.60)
         && report.precision.is_some_and(|value| value >= 0.60)
@@ -900,6 +1095,15 @@ fn automation_quality_sufficient(report: &perseval_service::BinaryCalibrationRep
         && report
             .expected_calibration_error
             .is_some_and(|value| value <= 0.08)
+}
+
+fn automation_quality_sufficient(report: &perseval_service::BinaryCalibrationReportV1) -> bool {
+    let decision_coverage = if report.attempted_count == 0 {
+        0.0
+    } else {
+        report.decided_count as f64 / report.attempted_count as f64
+    };
+    automation_quality_metrics_sufficient(report)
         && decision_coverage >= 0.90
         && report
             .macro_f1_interval
@@ -944,6 +1148,8 @@ impl Render for CalibrationScreen {
                     .child(
                         button_state("Refresh", false, !self.busy)
                             .id("refresh-calibration")
+                            .role(Role::Button)
+                            .aria_label("Refresh calibration releases and reports")
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
             )
