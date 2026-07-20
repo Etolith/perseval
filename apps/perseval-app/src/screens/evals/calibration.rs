@@ -379,10 +379,27 @@ impl CalibrationScreen {
     }
 
     fn displayed_report(&self) -> Option<&perseval_service::BinaryCalibrationReportV1> {
-        self.held_out_report().or_else(|| {
-            self.selected_release()
-                .map(|(_, release)| &release.fit_report)
-        })
+        self.reports
+            .first()
+            .and_then(|report| random_audit_report(&report.slice_reports).or(Some(&report.report)))
+            .or_else(|| {
+                self.selected_release()
+                    .map(|(_, release)| &release.fit_report)
+            })
+    }
+
+    fn displayed_report_scope(&self) -> &'static str {
+        if self
+            .reports
+            .first()
+            .is_some_and(|report| random_audit_report(&report.slice_reports).is_some())
+        {
+            "Metrics scope: held-out random-audit slice · used by automation safety gates"
+        } else if self.held_out_report().is_some() {
+            "Metrics scope: complete held-out report · no random-audit slice available"
+        } else {
+            "Metrics scope: calibration fit"
+        }
     }
 
     fn render_release_list(&self, cx: &mut Context<Self>) -> Div {
@@ -733,6 +750,13 @@ impl CalibrationScreen {
                             }))
                     }),
                 ),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_sm()
+                    .text_color(Theme::MUTED)
+                    .child(self.displayed_report_scope()),
             )
             .child(div().mt_5().child(content))
             .child(self.render_slice_performance())
