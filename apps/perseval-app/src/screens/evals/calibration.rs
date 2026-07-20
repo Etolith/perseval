@@ -1035,6 +1035,11 @@ impl CalibrationScreen {
                         .on_click(cx.listener(|this, _, _, cx| this.evaluate_held_out(cx)))
                 ))
                 .when(self.proposed_policy.is_some() && self.held_out_report().is_some(), |actions| actions.child(
+                    button_state("2 · Held-out test evaluated", true, false)
+                        .id("held-out-evaluated")
+                        .role(Role::Status)
+                        .aria_label("Step 2 complete: the held-out test was evaluated exactly once")
+                ).child(
                     button_state("3 · Activate reviewed policy", false, !self.busy && automation_ready)
                         .id("activate-threshold-policy")
                         .role(Role::Button)

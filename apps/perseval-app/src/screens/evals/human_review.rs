@@ -216,6 +216,14 @@ impl HumanReviewScreen {
                 this.busy = false;
                 match result {
                     Ok(presentation) => {
+                        if let Some(annotation) =
+                            presentation_latest_annotation(Some(&presentation)).cloned()
+                        {
+                            this.label = Some(annotation.label);
+                            this.evidence_keys = annotation.evidence_keys;
+                            this.explanation
+                                .update(cx, |input, cx| input.set_text(annotation.explanation, cx));
+                        }
                         this.presentation = Some(presentation);
                         this.notice = None;
                     }
@@ -516,7 +524,7 @@ impl HumanReviewScreen {
             .when(self.mode == ReviewModeV1::BlindCalibration, |list| {
                 list.child(
                     div().p_3().border_t_1().border_color(Theme::BORDER).child(
-                        button_state("Resume baseline queue", false, !self.busy)
+                        button_state("Resume blind calibration queue", false, !self.busy)
                             .id("resume-human-review-queue")
                             .role(Role::Button)
                             .aria_label("Resume blind calibration queue")
@@ -530,7 +538,19 @@ impl HumanReviewScreen {
         let Some(_task) = self.selected_task() else {
             let empty = self.tasks.is_empty();
             let blind_mode = self.mode == ReviewModeV1::BlindCalibration;
+            let empty_label = if empty {
+                if blind_mode {
+                    "No blind calibration cases exist for this project. Start from completed learned assessments. Perseval freezes trace-level leakage groups and keeps a held-out test split."
+                } else {
+                    "No visible triage cases exist for this project. Visible triage is deliberately excluded from calibration and agreement. Operator-opened cases appear here. Uncertainty-selected blind cases stay in Blind calibration and remain separate from the random-audit population."
+                }
+            } else {
+                "Choose a case to review its trace evidence."
+            };
             return div()
+                .id("human-review-empty-state")
+                .role(Role::Status)
+                .aria_label(empty_label)
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -579,6 +599,20 @@ impl HumanReviewScreen {
         };
         let mode_blind = self.mode == ReviewModeV1::BlindCalibration;
         let adjudicating = self.adjudication.is_some();
+        let detail_heading = if adjudicating {
+            "Resolve reviewer disagreement"
+        } else if !mode_blind {
+            "Triage automated review"
+        } else {
+            "Independent human answer"
+        };
+        let detail_guidance = if adjudicating {
+            "Compare the two human answers. The learned judge remains sealed until adjudication is committed."
+        } else if mode_blind {
+            "Judge output and peer answers stay sealed until submission."
+        } else {
+            "Visible triage is excluded from calibration and agreement."
+        };
         let mut detail = div()
             .id("human-review-detail-scroll")
             .flex_1()
@@ -592,27 +626,22 @@ impl HumanReviewScreen {
                     .justify_between()
                     .child(
                         div()
+                            .id("human-review-detail-heading")
+                            .role(Role::Group)
+                            .aria_label(format!("{detail_heading}. {detail_guidance}"))
                             .child(
                                 div()
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(if adjudicating {
-                                        "Resolve reviewer disagreement"
-                                    } else if !mode_blind {
-                                        "Triage automated review"
-                                    } else {
-                                        "Independent human answer"
-                                    }),
+                                    .child(detail_heading),
                             )
-                            .child(div().mt_1().text_sm().text_color(Theme::MUTED).child(
-                                if adjudicating {
-                                    "Compare the two human answers. The learned judge remains sealed until adjudication is committed."
-                                } else if mode_blind {
-                                    "Judge output and peer answers stay sealed until submission."
-                                } else {
-                                    "Visible triage is excluded from calibration and agreement."
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_sm()
+                                    .text_color(Theme::MUTED)
+                                    .child(detail_guidance),
+                            ),
                     )
                     .child(
                         button_state("Open exact trace", false, !self.busy)
@@ -656,6 +685,12 @@ impl HumanReviewScreen {
             detail = detail.child(
                 div()
                     .mt_5()
+                    .id("human-review-rubric")
+                    .role(Role::Group)
+                    .aria_label(format!(
+                        "Review rubric. {} Positive class: {}. Schema {}.",
+                        schema.instructions, schema.positive_class, schema.schema_version
+                    ))
                     .p_4()
                     .rounded_sm()
                     .border_1()
@@ -703,6 +738,12 @@ impl HumanReviewScreen {
             |packet| packet.evidence_keys.as_slice(),
         );
         let latest = presentation_latest_annotation(self.presentation.as_ref());
+        let blind_answer_locked = self.mode == ReviewModeV1::BlindCalibration
+            && matches!(
+                self.presentation.as_ref(),
+                Some(ReviewTaskPresentationV1::Revealed(_))
+            )
+            && !adjudicating;
         if let Some(packet) = &self.adjudication {
             detail = detail
                 .child(
@@ -743,18 +784,25 @@ impl HumanReviewScreen {
                         })),
                 );
         }
-        detail =
-            detail
-                .child(
-                    div()
-                        .mt_6()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(Theme::MUTED)
-                        .child("YOUR ANSWER"),
-                )
-                .child(
-                    div().mt_2().flex().flex_wrap().gap_2().children(
+        detail = detail
+            .child(
+                div()
+                    .mt_6()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Theme::MUTED)
+                    .child("YOUR ANSWER"),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .id("human-review-answer-options")
+                    .role(Role::RadioGroup)
+                    .aria_label("Human review answer")
+                    .children(
                         [
                             AnnotationLabelV1::Completed,
                             AnnotationLabelV1::Partial,
@@ -763,66 +811,109 @@ impl HumanReviewScreen {
                         ]
                         .into_iter()
                         .map(|label| {
-                            button_state(label_name(label), self.label == Some(label), !self.busy)
-                                .id(("human-answer-label", label_ordinal(label)))
-                                .role(Role::Button)
-                                .aria_label(format!("Answer {}", label_name(label)))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.choose_label(label, cx)),
-                                )
+                            let selected = self.label == Some(label);
+                            button_state(
+                                label_name(label),
+                                selected,
+                                !self.busy && !blind_answer_locked,
+                            )
+                            .id(("human-answer-label", label_ordinal(label)))
+                            .role(Role::RadioButton)
+                            .aria_label(format!(
+                                "Answer {}{}",
+                                label_name(label),
+                                if selected { ", selected" } else { "" }
+                            ))
+                            .aria_selected(selected)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.choose_label(label, cx)),
+                            )
                         }),
                     ),
-                )
-                .child(
-                    div()
-                        .mt_4()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(Theme::MUTED)
-                        .child("EXPLANATION"),
-                )
-                .child(div().mt_2().child(self.explanation.clone()))
-                .child(
-                    div()
-                        .mt_5()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(Theme::MUTED)
-                        .child("CITE TRACE EVIDENCE"),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .text_xs()
-                        .text_color(Theme::MUTED)
-                        .child("Select one or more locations from the frozen safe projection."),
-                )
-                .child(
-                    div().mt_2().flex().flex_wrap().gap_2().children(
-                        available_evidence
-                            .iter()
-                            .take(40)
-                            .enumerate()
-                            .map(|(index, key)| {
-                                let selected = self.evidence_keys.iter().any(|value| value == key);
-                                let key = key.clone();
-                                let evidence_label = evidence_key_label(&key);
-                                button_state(&evidence_label, selected, !self.busy)
-                                    .id(("review-evidence", index))
-                                    .role(Role::Button)
-                                    .aria_label(format!("Select evidence {evidence_label}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_evidence(&key, cx)
-                                    }))
-                            }),
-                    ),
-                );
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Theme::MUTED)
+                    .child("EXPLANATION"),
+            )
+            .child(div().mt_2().child(self.explanation.clone()))
+            .child(
+                div()
+                    .mt_5()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Theme::MUTED)
+                    .child("CITE TRACE EVIDENCE"),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(Theme::MUTED)
+                    .child("Select one or more locations from the frozen safe projection."),
+            )
+            .child(
+                div().mt_2().flex().flex_wrap().gap_2().children(
+                    available_evidence
+                        .iter()
+                        .take(40)
+                        .enumerate()
+                        .map(|(index, key)| {
+                            let selected = self.evidence_keys.iter().any(|value| value == key);
+                            let key = key.clone();
+                            let evidence_label = evidence_key_label(&key);
+                            button_state(
+                                &evidence_label,
+                                selected,
+                                !self.busy && !blind_answer_locked,
+                            )
+                            .id(("review-evidence", index))
+                            .role(Role::CheckBox)
+                            .aria_label(format!(
+                                "Evidence {evidence_label}{}",
+                                if selected { ", selected" } else { "" }
+                            ))
+                            .aria_toggled(if selected {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_evidence(&key, cx)),
+                            )
+                        }),
+                ),
+            );
 
         if let Some(ReviewTaskPresentationV1::Revealed(view)) = self.presentation.as_ref() {
+            let automated_accessible_label = view.assessment.evaluation.as_ref().map_or_else(
+                || {
+                    format!(
+                        "Automated output revealed after your answer. Provider run status {:?}. No learned-evaluator output was reported.",
+                        view.assessment.status
+                    )
+                },
+                |evaluation| {
+                    format!(
+                        "Automated output revealed after your answer. Provider run status {:?}. Learned verdict {}. Raw score {}.",
+                        view.assessment.status,
+                        evaluation.label.as_deref().unwrap_or("not reported"),
+                        evaluation
+                            .score
+                            .map_or_else(|| "not reported".into(), |score| format!("{score:.3}"))
+                    )
+                },
+            );
             detail = detail.child(
                 div()
                     .mt_6()
                     .pt_5()
+                    .id("human-review-automated-output")
+                    .role(Role::Group)
+                    .aria_label(automated_accessible_label)
                     .border_t_1()
                     .border_color(Theme::BORDER)
                     .child(
@@ -836,7 +927,7 @@ impl HumanReviewScreen {
                         div()
                             .mt_2()
                             .text_sm()
-                            .child(format!("Status: {:?}", view.assessment.status)),
+                            .child(format!("Provider run: {:?}", view.assessment.status)),
                     )
                     .child(div().mt_1().text_sm().text_color(Theme::MUTED).child(
                         view.assessment.evaluation.as_ref().map_or_else(
@@ -859,17 +950,36 @@ impl HumanReviewScreen {
         let explanation_ready = !self.explanation.read(cx).text().trim().is_empty();
         let evidence_ready =
             self.label == Some(AnnotationLabelV1::Abstain) || !self.evidence_keys.is_empty();
-        let blind_answer_locked = self.mode == ReviewModeV1::BlindCalibration
-            && matches!(
-                self.presentation.as_ref(),
-                Some(ReviewTaskPresentationV1::Revealed(_))
-            )
-            && !adjudicating;
         let enabled = !self.busy
             && !blind_answer_locked
             && self.label.is_some()
             && explanation_ready
             && evidence_ready;
+        let answer_status = if adjudicating {
+            self.adjudication
+                .as_ref()
+                .and_then(|packet| packet.latest_adjudication.as_ref())
+                .map_or_else(
+                    || "No adjudication committed yet.".into(),
+                    |adjudication| {
+                        format!(
+                            "Prior adjudication revision {} is stale and retained",
+                            adjudication.adjudication_revision
+                        )
+                    },
+                )
+        } else {
+            latest.map_or_else(
+                || "No answer submitted yet.".into(),
+                |annotation| {
+                    format!(
+                        "Current immutable revision {} · {}",
+                        annotation.annotation_revision,
+                        label_name(annotation.label)
+                    )
+                },
+            )
+        };
         detail
             .child(
                 div()
@@ -880,31 +990,13 @@ impl HumanReviewScreen {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(if adjudicating {
-                        self.adjudication
-                            .as_ref()
-                            .and_then(|packet| packet.latest_adjudication.as_ref())
-                            .map_or_else(
-                                || "No adjudication committed yet.".into(),
-                                |adjudication| {
-                                    format!(
-                                        "Prior adjudication revision {} is stale and retained",
-                                        adjudication.adjudication_revision
-                                    )
-                                },
-                            )
-                    } else {
-                        latest.map_or_else(
-                            || "No answer submitted yet.".into(),
-                            |annotation| {
-                                format!(
-                                    "Current immutable revision {} · {}",
-                                    annotation.annotation_revision,
-                                    label_name(annotation.label)
-                                )
-                            },
-                        )
-                    })
+                    .child(
+                        div()
+                            .id("human-review-answer-status")
+                            .role(Role::Status)
+                            .aria_label(answer_status.clone())
+                            .child(answer_status),
+                    )
                     .child(
                         button_state(
                             if adjudicating {
@@ -970,6 +1062,9 @@ impl Render for HumanReviewScreen {
                 div()
                     .flex()
                     .gap_2()
+                    .id("review-mode-options")
+                    .role(Role::RadioGroup)
+                    .aria_label("Review queue mode")
                     .child(
                         button_state(
                             "Blind calibration",
@@ -977,8 +1072,9 @@ impl Render for HumanReviewScreen {
                             !self.busy,
                         )
                         .id("review-mode-blind")
-                        .role(Role::Button)
+                        .role(Role::RadioButton)
                         .aria_label("Blind calibration; automated output and peer answers remain sealed until submission")
+                        .aria_selected(self.mode == ReviewModeV1::BlindCalibration)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_mode(ReviewModeV1::BlindCalibration, cx)
                         })),
@@ -990,8 +1086,9 @@ impl Render for HumanReviewScreen {
                             !self.busy,
                         )
                         .id("review-mode-visible")
-                        .role(Role::Button)
+                        .role(Role::RadioButton)
                         .aria_label("Visible triage; excluded from calibration and agreement")
+                        .aria_selected(self.mode == ReviewModeV1::VisibleTriage)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_mode(ReviewModeV1::VisibleTriage, cx)
                         })),
