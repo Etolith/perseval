@@ -505,7 +505,9 @@ impl WorkspaceStore {
         binding_rule_release_id: &str,
         provenance_override: Option<TraceContextBindingProvenanceV1>,
     ) -> Result<ContextBindingRecordV1, StoreError> {
+        validate_project_scope(project_id)?;
         let control = self.control.lock().expect("control store lock poisoned");
+        ensure_project_exists(&control, &self.workspace_id, project_id)?;
         let (agent_id, build_id, environment, lifecycle): (
             Option<String>,
             Option<String>,
@@ -645,7 +647,9 @@ impl WorkspaceStore {
         project_id: &str,
         context_release_id: &str,
     ) -> Result<ContextBackfillPreviewV1, StoreError> {
+        validate_project_scope(project_id)?;
         let control = self.control.lock().expect("control store lock poisoned");
+        ensure_project_exists(&control, &self.workspace_id, project_id)?;
         let release_exists = control.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_context_releases
               WHERE context_release_id = ?1 AND project_id = ?2)",
@@ -815,7 +819,7 @@ impl WorkspaceStore {
     }
 }
 
-fn validate_project_scope(project_id: &str) -> Result<(), StoreError> {
+pub(super) fn validate_project_scope(project_id: &str) -> Result<(), StoreError> {
     if project_id.trim().is_empty() || project_id == crate::model::UNASSIGNED_PROJECT_ID {
         return Err(StoreError::Invalid(
             "learned context requires an explicit project".into(),
@@ -824,7 +828,7 @@ fn validate_project_scope(project_id: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn ensure_project_exists(
+pub(super) fn ensure_project_exists(
     connection: &SqliteConnection,
     workspace_id: &str,
     project_id: &str,

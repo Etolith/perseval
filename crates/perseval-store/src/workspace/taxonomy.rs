@@ -1,3 +1,4 @@
+use super::context::{ensure_project_exists, validate_project_scope};
 use super::*;
 
 use crate::model::{ReviewAuthorityV1, TaxonomyChangeDraftRecordV1, TaxonomyGovernanceSummaryV1};
@@ -8,18 +9,9 @@ impl WorkspaceStore {
         &self,
         project_id: &str,
     ) -> Result<TaxonomyGovernanceSummaryV1, StoreError> {
-        if project_id.trim().is_empty() {
-            return Err(StoreError::Invalid("project_id must not be empty".into()));
-        }
+        validate_project_scope(project_id)?;
         let control = self.control.lock().expect("control store lock poisoned");
-        let project_exists = control.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE workspace_id = ?1 AND project_id = ?2)",
-            params![self.workspace_id, project_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !project_exists {
-            return Err(StoreError::Invalid("project does not exist".into()));
-        }
+        ensure_project_exists(&control, &self.workspace_id, project_id)?;
         let drafts_in_review = control.query_row(
             "SELECT COUNT(*) FROM taxonomy_change_drafts WHERE project_id = ?1 AND status = 'review'",
             params![project_id],
@@ -110,7 +102,9 @@ impl WorkspaceStore {
         &self,
         project_id: &str,
     ) -> Result<Option<(String, AgentTaxonomyReleaseV1)>, StoreError> {
+        validate_project_scope(project_id)?;
         let control = self.control.lock().expect("control store lock poisoned");
+        ensure_project_exists(&control, &self.workspace_id, project_id)?;
         control
             .query_row(
                 "SELECT taxonomy_release_id, release_json FROM taxonomy_releases
@@ -142,7 +136,7 @@ impl WorkspaceStore {
     ) -> Result<String, StoreError> {
         if authority != ReviewAuthorityV1::Human {
             return Err(StoreError::Invalid(
-                "only a human reviewer can approve issue definitions".into(),
+                "only a human reviewer can approve a taxonomy change draft".into(),
             ));
         }
         let release = {
@@ -171,10 +165,9 @@ impl WorkspaceStore {
         source_manifest: &Value,
         created_by: &str,
     ) -> Result<String, StoreError> {
-        if project_id.trim().is_empty() || created_by.trim().is_empty() {
-            return Err(StoreError::Invalid(
-                "project_id and created_by must not be empty".into(),
-            ));
+        validate_project_scope(project_id)?;
+        if created_by.trim().is_empty() {
+            return Err(StoreError::Invalid("created_by must not be empty".into()));
         }
         let now = now_unix_ms();
         let identity = (
@@ -187,6 +180,7 @@ impl WorkspaceStore {
         );
         let draft_id = taxonomy_identity(&identity)?;
         let control = self.control.lock().expect("control store lock poisoned");
+        ensure_project_exists(&control, &self.workspace_id, project_id)?;
         if let Some(base_release_id) = base_release_id {
             let exists = control.query_row(
                 "SELECT EXISTS(SELECT 1 FROM taxonomy_releases
@@ -227,7 +221,7 @@ impl WorkspaceStore {
     ) -> Result<String, StoreError> {
         if authority != ReviewAuthorityV1::Human {
             return Err(StoreError::Invalid(
-                "only a human reviewer can activate an issue-definition release".into(),
+                "only a human reviewer can activate a taxonomy release".into(),
             ));
         }
         release

@@ -7,8 +7,8 @@ use perseval_service::{LiveTraceService, PersevalConfigV1};
 use perseval_store::{
     AssessmentCommitV1, AssessmentItemStatusV1, CreateProjectV1,
     PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION, ProjectAssessmentPolicyV1, ReviewAuthorityV1,
-    SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1, SpanUpsertV1, WorkspaceStore,
-    WorkspaceStoreLayout,
+    SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1, SpanUpsertV1, UNASSIGNED_PROJECT_ID,
+    WorkspaceStore, WorkspaceStoreLayout,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -228,6 +228,51 @@ fn activate_context(store: &WorkspaceStore) -> (String, String) {
         .bind_finalized_trace_context("project-a", "trace-a", 1, &rule_id, None)
         .unwrap();
     (release_id, rule_id)
+}
+
+#[test]
+fn learned_governance_rejects_unassigned_and_missing_project_scopes() {
+    let (_directory, store) = setup();
+    assert!(
+        store
+            .bind_finalized_trace_context(
+                UNASSIGNED_PROJECT_ID,
+                "trace-a",
+                1,
+                "missing-rule",
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("explicit project")
+    );
+    assert!(
+        store
+            .preview_context_backfill(UNASSIGNED_PROJECT_ID, "missing-release")
+            .unwrap_err()
+            .to_string()
+            .contains("explicit project")
+    );
+    assert!(
+        store
+            .taxonomy_governance_summary(UNASSIGNED_PROJECT_ID)
+            .unwrap_err()
+            .to_string()
+            .contains("explicit project")
+    );
+    assert!(
+        store
+            .create_taxonomy_change_draft(
+                "missing-project",
+                None,
+                &json!({"nodes": []}),
+                &json!({"source": "test"}),
+                "codex",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("project does not exist")
+    );
 }
 
 #[test]
@@ -589,6 +634,14 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
             .map(Vec::len),
         Some(2),
         "held-out-looking fixture files must not enter the source snapshot"
+    );
+    assert_eq!(
+        draft
+            .source_manifest
+            .pointer("/repository")
+            .and_then(serde_json::Value::as_str),
+        Some("agent-repository"),
+        "durable source manifests must not expose absolute repository paths"
     );
     let release_id = service
         .approve_agent_context_draft(&draft.draft_id, "qa-reviewer", ReviewAuthorityV1::Human)

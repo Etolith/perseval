@@ -41,6 +41,12 @@ impl LiveTraceService {
                 "agent specification source must be a directory".into(),
             ));
         }
+        let repository_label = repository_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("selected-repository")
+            .to_owned();
         let sources = collect_context_sources(&repository_path)
             .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         if sources.is_empty() {
@@ -61,7 +67,7 @@ impl LiveTraceService {
             }));
         }
         let manifest = serde_json::json!({
-            "repository": repository_path,
+            "repository": repository_label.clone(),
             "files": files,
             "local_inputs": [
                 {
@@ -82,7 +88,7 @@ impl LiveTraceService {
         let source_snapshot_id = self.store.record_context_source_snapshot(
             project_id,
             "approved_repository",
-            &repository_path.display().to_string(),
+            &repository_label,
             &content_hash,
             "internal",
             &manifest,

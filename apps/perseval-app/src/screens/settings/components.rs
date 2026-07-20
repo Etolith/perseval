@@ -67,9 +67,11 @@ pub(super) fn review_row(
     detail: String,
     stacked: bool,
 ) -> impl IntoElement {
-    let accessible_label = format!("{label}. {value}. {detail}");
+    let accessible_detail = detail.chars().take(240).collect::<String>();
+    let accessible_label = format!("{label}. {accessible_detail}");
+    let row_id = stable_review_row_id(label, &value, &detail);
     div()
-        .id(accessible_label.clone())
+        .id(row_id)
         .role(Role::Group)
         .aria_label(accessible_label)
         .mt_4()
@@ -97,6 +99,21 @@ pub(super) fn review_row(
                 .child(div().text_xs().text_color(Theme::TEXT).child(value))
                 .child(div().mt_2().text_xs().text_color(Theme::DIM).child(detail)),
         )
+}
+
+fn stable_review_row_id(label: &str, value: &str, detail: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in label
+        .bytes()
+        .chain([0])
+        .chain(value.bytes())
+        .chain([0])
+        .chain(detail.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("review-row-{hash:016x}")
 }
 
 pub(super) fn editable_row(
