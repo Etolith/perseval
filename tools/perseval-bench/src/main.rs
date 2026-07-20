@@ -19,6 +19,7 @@ mod qualify;
 mod reanalyze;
 mod replay;
 mod score;
+mod task_completion;
 
 #[derive(Debug, Serialize)]
 struct SourceColumn {
@@ -304,6 +305,91 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-run" => {
+            let suite = args
+                .next()
+                .ok_or_else(|| "task-completion-run requires a trace suite".to_string())?;
+            let labels = args
+                .next()
+                .ok_or_else(|| "task-completion-run requires a label sidecar".to_string())?;
+            let split = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-run requires a split".to_string())?;
+            let output = args
+                .next()
+                .ok_or_else(|| "task-completion-run requires an output directory".to_string())?;
+            let model = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-run requires a model".to_string())?;
+            let profile = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-run requires a rubric profile".to_string())?;
+            let concurrency = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "concurrency is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or(4);
+            let limit = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "limit is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion::run(task_completion::RunOptions {
+                suite: Path::new(&suite),
+                labels: Path::new(&labels),
+                split: &split,
+                output: Path::new(&output),
+                model: &model,
+                profile: &profile,
+                concurrency,
+                limit,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        "task-completion-score" => {
+            let recall = args
+                .next()
+                .ok_or_else(|| "task-completion-score requires recall-judge results".to_string())?;
+            let specificity = args.next().ok_or_else(|| {
+                "task-completion-score requires specificity-judge results".to_string()
+            })?;
+            let labels = args
+                .next()
+                .ok_or_else(|| "task-completion-score requires a label sidecar".to_string())?;
+            let output = args
+                .next()
+                .ok_or_else(|| "task-completion-score requires an output report".to_string())?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion::score(
+                Path::new(&recall),
+                Path::new(&specificity),
+                Path::new(&labels),
+            )?;
+            score::write_json_report(&report, Path::new(&output))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "profile" => {
             let workspace = args
                 .next()
@@ -364,6 +450,6 @@ fn inspect_source(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
+        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
     )
 }

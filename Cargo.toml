@@ -18,6 +18,8 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 async-channel = "2.5"
+async-trait = "0.1"
+anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
 directories = "6"

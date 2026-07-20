@@ -5119,6 +5119,8 @@ dependencies = [
 name = "perseval-bench"
 version = "0.1.2"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "duckdb",
  "flate2",
  "hex",
