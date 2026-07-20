@@ -4,6 +4,7 @@
 
 #[path = "analysis.rs"]
 mod analyzer;
+pub mod assessments;
 pub mod commands;
 pub mod config;
 mod demo_trace;
@@ -13,23 +14,31 @@ pub mod queries;
 pub mod runtime;
 mod topology;
 
-pub use config::{ConfigError, McpConfig, OpenAiAnalysisConfig, PersevalConfigV1};
+pub use config::{
+    AssessmentConfig, ConfigError, McpConfig, OpenAiAnalysisConfig, PersevalConfigV1,
+};
 pub use live::{
     BlobPreviewV1, ComparisonCancellationToken, LiveServiceError, LiveTraceService,
     SubscriptionError, TraceFileImportResultV1, TraceSnapshot, TraceSubscription,
 };
 pub use perseval_store::{
-    AnalysisStatus, BlobRefV1, CandidateGenerationItemOutcomeV1, CandidateGenerationJobStatusV1,
-    CandidateGenerationJobV1, CandidateGenerationOutcomeKindV1, CreateProjectV1,
-    EvalBatchExclusionV1, EvalBatchItemPreviewV1, EvalBatchPreviewV1, EvalBatchSelectionSpecV1,
-    EvalCandidatePreview, EvalCandidateRecordV1, EvalEvidenceSelectionPolicyV1,
-    EvalReviewDecisionV1, EvalReviewQueueStateV1, EvalSelectionReasonV1, FailureFiltersV1,
-    FailureGroupDetail, FailureGroupPageV1, FailureGroupSummary, FailureOccurrence,
-    FailureRecurrenceBucketV1, FailureRecurrenceSeriesV1, FeatureSimilarityCohortSummary,
-    FindingDispositionStateV1, FindingDispositionV1, FindingEvidence, IdentityQualityV1,
-    OpenAiProviderHealthV1, ProjectV1, QueryScopeCriteriaV1, QueryScopeV1,
-    RUN_COMPARISON_REQUEST_SCHEMA_VERSION, ReviewEvalCandidateV1, RunComparisonRequestV1,
-    RunFiltersV1, RunOrderV1, RunSummary, SourceHealth, SpanRow, SpanTreePageV1, TraceChangeKind,
+    AgentContextDraftV1, AgentContextGovernanceSummaryV1, AnalysisStatus, AssessmentCommitV1,
+    AssessmentItemStatusV1, AssessmentJobExportV1, AssessmentJobItemExportV1,
+    AssessmentJobStatusV1, AssessmentJobV1, AssessmentRecordV1, AssessmentRuntimeHealthV1,
+    BlobRefV1, CandidateGenerationItemOutcomeV1, CandidateGenerationJobStatusV1,
+    CandidateGenerationJobV1, CandidateGenerationOutcomeKindV1, ContextBackfillPreviewV1,
+    ContextBackfillResultV1, ContextBindingRecordV1, ContextBindingRuleSetV1,
+    ContextBindingSelectorV1, ContextBindingStatusV1, CreateProjectV1, EvalBatchExclusionV1,
+    EvalBatchItemPreviewV1, EvalBatchPreviewV1, EvalBatchSelectionSpecV1, EvalCandidatePreview,
+    EvalCandidateRecordV1, EvalEvidenceSelectionPolicyV1, EvalReviewDecisionV1,
+    EvalReviewQueueStateV1, EvalSelectionReasonV1, FailureFiltersV1, FailureGroupDetail,
+    FailureGroupPageV1, FailureGroupSummary, FailureOccurrence, FailureRecurrenceBucketV1,
+    FailureRecurrenceSeriesV1, FeatureSimilarityCohortSummary, FindingDispositionStateV1,
+    FindingDispositionV1, FindingEvidence, IdentityQualityV1, OpenAiProviderHealthV1,
+    ProjectAssessmentPolicyV1, ProjectV1, QueryScopeCriteriaV1, QueryScopeV1,
+    RUN_COMPARISON_REQUEST_SCHEMA_VERSION, ReviewAuthorityV1, ReviewEvalCandidateV1,
+    RunComparisonRequestV1, RunFiltersV1, RunOrderV1, RunSummary, SourceHealth, SpanRow,
+    SpanTreePageV1, TaxonomyChangeDraftRecordV1, TaxonomyGovernanceSummaryV1, TraceChangeKind,
     TraceDeltaV1, TraceLifecycle, UNASSIGNED_PROJECT_ID,
 };
 pub use queries::{SpanCategory, SpanView, TRACE_FILE_ENV, TraceCatalog, TraceView};

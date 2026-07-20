@@ -4,9 +4,13 @@ impl FailureInbox {
     pub(super) fn retry_current_view(&mut self, cx: &mut Context<Self>) {
         self.load_error = None;
         if self.full_trace {
-            if let Some((trace_id, revision)) = self.full_trace_identity.clone() {
+            if let (Some(project_id), Some((trace_id, revision))) = (
+                self.full_trace_project_id.clone(),
+                self.full_trace_identity.clone(),
+            ) {
                 self.full_trace_tree.clear();
                 self.show_full_trace(
+                    &project_id,
                     &trace_id,
                     revision,
                     self.full_trace_origin.clone(),

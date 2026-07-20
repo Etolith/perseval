@@ -912,7 +912,137 @@ impl FailureInbox {
             .child(body)
     }
 
-    fn render_inspector_tab(&self) -> gpui::Stateful<Div> {
+    fn render_inspector_tab(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        if self.tab == InspectorTab::AutomatedReviews {
+            let mut panel = div()
+                .id("inspector-tab-panel")
+                .role(Role::TabPanel)
+                .aria_label("Automated reviews for this exact trace revision")
+                .mt_3()
+                .flex()
+                .flex_col()
+                .gap_3();
+            if self.trace_assessments.is_empty() {
+                panel = panel.child(
+                    div()
+                        .p_3()
+                        .rounded_sm()
+                        .bg(Theme::BG)
+                        .text_xs()
+                        .text_color(Theme::DIM)
+                        .child("No automated reviews exist for this exact trace revision. Deterministic findings are not shown as learned reviews."),
+                );
+            }
+            for (assessment_index, assessment) in self.trace_assessments.iter().enumerate() {
+                let evaluation = assessment.evaluation.as_ref();
+                let verdict = evaluation
+                    .map(|evaluation| review_verdict_label(evaluation.verdict).to_string())
+                    .unwrap_or_else(|| review_status_label(assessment.status).to_string());
+                let explanation = evaluation
+                    .map(|evaluation| evaluation.explanation.as_str())
+                    .unwrap_or("No model explanation was produced for this terminal state.");
+                let score = evaluation
+                    .and_then(|evaluation| evaluation.score)
+                    .map(|score| format!("{score:.3}"))
+                    .unwrap_or_else(|| "not reported".into());
+                let confidence = evaluation
+                    .and_then(|evaluation| evaluation.model_reported_confidence)
+                    .map(|confidence| format!("{confidence:.3} (model-reported)"))
+                    .unwrap_or_else(|| "not reported".into());
+                let abstention = evaluation
+                    .and_then(|evaluation| evaluation.abstention_reason)
+                    .map(|reason| format!(" · {}", review_abstention_label(reason)))
+                    .unwrap_or_default();
+                let card_label = format!(
+                    "Automated review {verdict}{abstention}. {explanation}. Score {score}. Confidence {confidence}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}.",
+                    assessment.cost_micros as f64 / 1_000_000.0,
+                    assessment.latency_ms,
+                    short_review_identity(&assessment.evaluator_release_id),
+                    assessment
+                        .context_release_id
+                        .as_deref()
+                        .map(short_review_identity)
+                        .unwrap_or("unresolved"),
+                );
+                let mut card = div()
+                    .id(("automated-review", assessment_index))
+                    .role(Role::Group)
+                    .aria_label(card_label)
+                    .p_3()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(Theme::BORDER)
+                    .bg(Theme::BG)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{verdict}{abstention}")),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(Theme::MUTED)
+                            .child(explanation.to_string()),
+                    )
+                    .child(
+                        div()
+                            .mt_3()
+                            .text_xs()
+                            .text_color(Theme::DIM)
+                            .child(format!(
+                                "Score {score} · confidence {confidence}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProvider {} · requested {} · returned {}",
+                                assessment.cost_micros as f64 / 1_000_000.0,
+                                assessment.latency_ms,
+                                short_review_identity(&assessment.evaluator_release_id),
+                                assessment
+                                    .context_release_id
+                                    .as_deref()
+                                    .map(short_review_identity)
+                                    .unwrap_or("unresolved"),
+                                short_review_identity(&assessment.context_binding_id),
+                                short_review_identity(&assessment.projection_hash),
+                                assessment.provider.as_deref().unwrap_or("no provider call"),
+                                assessment.requested_model.as_deref().unwrap_or("none"),
+                                assessment.returned_model.as_deref().unwrap_or("none")
+                            )),
+                    );
+                if let Some(evaluation) = evaluation {
+                    for (evidence_index, citation) in evaluation.evidence.iter().enumerate() {
+                        if let Some(span_id) = review_evidence_span_id(&citation.location) {
+                            let span_id = span_id.to_string();
+                            card = card.child(
+                                button(
+                                    &format!(
+                                        "Open evidence {} · {}",
+                                        citation.evidence_key,
+                                        short_review_identity(&span_id)
+                                    ),
+                                    false,
+                                )
+                                .id((
+                                    "open-automated-review-evidence",
+                                    assessment_index * 100 + evidence_index,
+                                ))
+                                .role(Role::Button)
+                                .aria_label(format!(
+                                    "Open automated review evidence {} in the trace",
+                                    citation.evidence_key
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.focus_assessment_evidence_span(span_id.clone(), cx)
+                                    },
+                                )),
+                            );
+                        }
+                    }
+                }
+                panel = panel.child(card);
+            }
+            return panel;
+        }
         let content = match self.tab {
             InspectorTab::Finding => self
                 .evidence
@@ -974,6 +1104,7 @@ impl FailureInbox {
             InspectorTab::Payload => {
                 "Payloads remain hidden until an explicit bounded reveal below.".into()
             }
+            InspectorTab::AutomatedReviews => unreachable!(),
         };
         div()
             .id("inspector-tab-panel")
@@ -1011,6 +1142,12 @@ impl FailureInbox {
                             cx,
                         ),
                         tab_button(
+                            "Reviews",
+                            self.tab == InspectorTab::AutomatedReviews,
+                            InspectorTab::AutomatedReviews,
+                            cx,
+                        ),
+                        tab_button(
                             "Span",
                             self.tab == InspectorTab::Span,
                             InspectorTab::Span,
@@ -1030,7 +1167,7 @@ impl FailureInbox {
                         ),
                     ]),
             )
-            .child(self.render_inspector_tab());
+            .child(self.render_inspector_tab(cx));
         if self.tab == InspectorTab::Payload
             && let Some(span) = self.focused_span_snapshot.as_ref()
         {
@@ -1238,6 +1375,66 @@ fn missing_telemetry_summary(span: Option<&SpanRow>, trace_spans: &[SpanRow]) ->
             "This error is missing telemetry needed for a reliable diagnosis: {}. Add those fields and send another run.",
             missing.join(", ")
         )
+    }
+}
+
+fn short_review_identity(value: &str) -> &str {
+    value.get(..value.len().min(18)).unwrap_or(value)
+}
+
+fn review_verdict_label(verdict: perseval_service::analysis::LearnedVerdictV1) -> &'static str {
+    use perseval_service::analysis::LearnedVerdictV1::*;
+    match verdict {
+        Pass => "Passed",
+        Fail => "Flagged",
+        Abstain => "Abstained",
+    }
+}
+
+fn review_status_label(status: perseval_service::AssessmentItemStatusV1) -> &'static str {
+    use perseval_service::AssessmentItemStatusV1::*;
+    match status {
+        Pending => "Waiting",
+        Running => "Running",
+        Succeeded => "Completed",
+        Abstained => "Abstained",
+        Failed => "Failed",
+        Cancelled => "Cancelled",
+        BudgetBlocked => "Blocked by budget",
+        PrivacyBlocked => "Blocked by privacy policy",
+        ProviderUnavailable => "Provider unavailable",
+        NotApplicable => "Not applicable",
+    }
+}
+
+fn review_abstention_label(
+    reason: perseval_service::analysis::LearnedAbstentionReasonV1,
+) -> &'static str {
+    use perseval_service::analysis::LearnedAbstentionReasonV1::*;
+    match reason {
+        ContextUnresolved => "agent specification unresolved",
+        ContextInsufficient => "agent specification incomplete",
+        ContentUnavailable => "required content unavailable",
+        ContentTruncated => "required content truncated",
+        PrivacyBlocked => "blocked by privacy policy",
+        EvidenceInsufficient => "not enough trace evidence",
+        OutOfDistribution => "outside the quality check's supported scope",
+        ProviderUnavailable => "provider unavailable",
+        InvalidProviderOutput => "provider response invalid",
+        NotApplicable => "quality check not applicable",
+    }
+}
+
+fn review_evidence_span_id(
+    location: &perseval_service::analysis::EvaluationEvidenceLocationV1,
+) -> Option<&str> {
+    use perseval_service::analysis::EvaluationEvidenceLocationV1::*;
+    match location {
+        Span { span_id }
+        | Event { span_id, .. }
+        | SpanAttribute { span_id, .. }
+        | Segment { span_id, .. } => Some(span_id),
+        TraceAttribute { .. } => None,
     }
 }
 

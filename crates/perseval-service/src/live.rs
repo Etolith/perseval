@@ -22,11 +22,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::analyzer::{CohortControlHandle, spawn_analysis_worker};
+use crate::assessments::{FoundationAssessmentExecutor, spawn_assessment_worker};
 use crate::config::PersevalConfigV1;
 use crate::jobs::spawn_candidate_job_worker;
 use crate::topology::spawn_topology_worker;
 use traces_to_evals::{ClusterAssignment, ClusterModel, TraceAlignmentOptions, TraceComparison};
 
+mod assessments;
 mod local_import;
 mod product;
 mod writer;
@@ -533,6 +535,7 @@ pub struct LiveTraceService {
     hub: Arc<DeltaHub>,
     writer_thread: Mutex<Option<thread::JoinHandle<()>>>,
     analysis_thread: Mutex<Option<thread::JoinHandle<()>>>,
+    assessment_thread: Mutex<Option<thread::JoinHandle<()>>>,
     cohort_control: Option<CohortControlHandle>,
     openai_health: crate::analyzer::OpenAiHealthHandle,
     topology_thread: Mutex<Option<thread::JoinHandle<()>>>,
@@ -606,6 +609,13 @@ impl LiveTraceService {
             analysis_shutdown.clone(),
         )
         .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
+        let assessment_worker = spawn_assessment_worker(
+            store.clone(),
+            config.assessments.clone(),
+            Arc::new(FoundationAssessmentExecutor),
+            analysis_shutdown.clone(),
+        )
+        .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         Ok(Arc::new(Self {
             store,
             config,
@@ -613,6 +623,7 @@ impl LiveTraceService {
             hub,
             writer_thread: Mutex::new(Some(writer_thread)),
             analysis_thread: Mutex::new(Some(analysis_worker.thread)),
+            assessment_thread: Mutex::new(Some(assessment_worker.thread)),
             cohort_control: analysis_worker.cohort_control,
             openai_health: analysis_worker.openai_health,
             topology_thread: Mutex::new(Some(topology_thread)),
@@ -939,6 +950,14 @@ impl LiveTraceService {
             .analysis_thread
             .lock()
             .expect("analysis thread lock poisoned")
+            .take()
+        {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self
+            .assessment_thread
+            .lock()
+            .expect("assessment thread lock poisoned")
             .take()
         {
             let _ = thread.join();

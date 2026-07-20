@@ -31,6 +31,7 @@ pub struct PersevalConfigV1 {
     pub stream: StreamConfig,
     pub lifecycle: LifecycleConfig,
     pub analysis: AnalysisConfig,
+    pub assessments: AssessmentConfig,
     pub query: QueryConfig,
     pub blobs: BlobConfig,
     pub mcp: McpConfig,
@@ -121,6 +122,16 @@ pub struct OpenAiAnalysisConfig {
     pub emit_abstentions: bool,
 }
 
+/// Secret-free process settings for the learned-assessment worker. Provider
+/// permission and spend limits remain project-scoped durable policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AssessmentConfig {
+    pub enabled: bool,
+    pub poll_interval_ms: u64,
+    pub estimated_attempt_cost_micros: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QueryConfig {
@@ -171,6 +182,7 @@ impl Default for PersevalConfigV1 {
             stream: StreamConfig::default(),
             lifecycle: LifecycleConfig::default(),
             analysis: AnalysisConfig::default(),
+            assessments: AssessmentConfig::default(),
             query: QueryConfig::default(),
             blobs: BlobConfig::default(),
             mcp: McpConfig::default(),
@@ -260,6 +272,16 @@ impl Default for OpenAiAnalysisConfig {
             embedding_batch_size: 128,
             minimum_failure_confidence_milli: 800,
             emit_abstentions: true,
+        }
+    }
+}
+
+impl Default for AssessmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_ms: 100,
+            estimated_attempt_cost_micros: 0,
         }
     }
 }
@@ -500,6 +522,10 @@ impl PersevalConfigV1 {
             ),
             ("analysis.maximum_clusters", self.analysis.maximum_clusters),
             ("analysis.minimum_findings", self.analysis.minimum_findings),
+            (
+                "assessments.poll_interval_ms",
+                self.assessments.poll_interval_ms as usize,
+            ),
             (
                 "analysis.openai.embedding_batch_size",
                 self.analysis.openai.embedding_batch_size,

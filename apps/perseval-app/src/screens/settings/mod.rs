@@ -1,10 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{
-    AccessibleAction, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, Role,
-    ScrollHandle, Toggled, Window, div, point, prelude::*, px,
+    AccessibleAction, AppContext, ClipboardItem, Context, Entity, EventEmitter, FontWeight,
+    IntoElement, PathPromptOptions, Render, Role, ScrollHandle, Toggled, Window, div, point,
+    prelude::*, px,
 };
-use perseval_service::{OpenAiProviderHealthV1, PersevalConfigV1};
+use perseval_service::{
+    AgentContextGovernanceSummaryV1, AssessmentRuntimeHealthV1, ContextBackfillPreviewV1,
+    LiveTraceService, OpenAiProviderHealthV1, PersevalConfigV1, ReviewAuthorityV1,
+    TaxonomyGovernanceSummaryV1,
+};
 
 use crate::components::{TextInput, button};
 use crate::design::{Breakpoint, Theme};
@@ -13,7 +19,9 @@ use crate::workbench::{AppearancePreferencesV1, TextScale};
 
 mod components;
 
-use components::{action_button, editable_row, notice, section, setting_row, switch_row};
+use components::{
+    action_button, editable_row, notice, review_row, section, setting_row, switch_row,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum SettingsEvent {
@@ -23,14 +31,18 @@ pub(crate) enum SettingsEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsCategory {
     WorkspaceStorage,
+    AgentSpecification,
+    TasksIssueTypes,
     PrivacyPayloads,
     AiFeatures,
     Appearance,
 }
 
 impl SettingsCategory {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::WorkspaceStorage,
+        Self::AgentSpecification,
+        Self::TasksIssueTypes,
         Self::PrivacyPayloads,
         Self::AiFeatures,
         Self::Appearance,
@@ -39,6 +51,8 @@ impl SettingsCategory {
     const fn label(self) -> &'static str {
         match self {
             Self::WorkspaceStorage => "Workspace & collection",
+            Self::AgentSpecification => "Agent specification",
+            Self::TasksIssueTypes => "Tasks & issue types",
             Self::PrivacyPayloads => "Privacy & payloads",
             Self::AiFeatures => "AI features",
             Self::Appearance => "Appearance",
@@ -48,6 +62,12 @@ impl SettingsCategory {
     const fn description(self) -> &'static str {
         match self {
             Self::WorkspaceStorage => "Choose where data lives and how local traces arrive.",
+            Self::AgentSpecification => {
+                "Review sourced agent intent, immutable versions, and exact trace bindings."
+            }
+            Self::TasksIssueTypes => {
+                "Govern stable task, capability, issue, and human-review definitions."
+            }
             Self::PrivacyPayloads => "Control local payload previews and storage.",
             Self::AiFeatures => "Choose local or hosted analysis.",
             Self::Appearance => "Adjust reading scale and motion.",
@@ -57,6 +77,8 @@ impl SettingsCategory {
     const fn icon(self) -> AppIcon {
         match self {
             Self::WorkspaceStorage => AppIcon::Database,
+            Self::AgentSpecification => AppIcon::Evals,
+            Self::TasksIssueTypes => AppIcon::Inbox,
             Self::PrivacyPayloads => AppIcon::Shield,
             Self::AiFeatures => AppIcon::Sparkles,
             Self::Appearance => AppIcon::Accessibility,
@@ -65,6 +87,7 @@ impl SettingsCategory {
 }
 
 pub(crate) struct SettingsScreen {
+    service: Option<Arc<LiveTraceService>>,
     runtime_config: PersevalConfigV1,
     saved_config: PersevalConfigV1,
     draft: PersevalConfigV1,
@@ -78,6 +101,15 @@ pub(crate) struct SettingsScreen {
     openai_embedding_model: Entity<TextInput>,
     openai_chat_model: Entity<TextInput>,
     openai_health: OpenAiProviderHealthV1,
+    assessment_health: AssessmentRuntimeHealthV1,
+    selected_project_id: Option<String>,
+    context_governance: AgentContextGovernanceSummaryV1,
+    taxonomy_governance: TaxonomyGovernanceSummaryV1,
+    preparing_context: bool,
+    context_notice: Option<(String, gpui::Rgba)>,
+    context_backfill_preview: Option<ContextBackfillPreviewV1>,
+    preparing_taxonomy: bool,
+    taxonomy_notice: Option<(String, gpui::Rgba)>,
     workspace_bytes: Option<u64>,
     size_error: Option<String>,
     saving: bool,
@@ -88,10 +120,16 @@ pub(crate) struct SettingsScreen {
 }
 
 impl SettingsScreen {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        service: Option<Arc<LiveTraceService>>,
         config: PersevalConfigV1,
         appearance: AppearancePreferencesV1,
         openai_health: OpenAiProviderHealthV1,
+        assessment_health: AssessmentRuntimeHealthV1,
+        selected_project_id: Option<String>,
+        context_governance: AgentContextGovernanceSummaryV1,
+        taxonomy_governance: TaxonomyGovernanceSummaryV1,
         cx: &mut Context<Self>,
     ) -> Self {
         let workspace_id = Self::input(&config.workspace_id, "Workspace ID", 120, cx);
@@ -143,6 +181,7 @@ impl SettingsScreen {
         })
         .detach();
         Self {
+            service,
             runtime_config: config.clone(),
             saved_config: config.clone(),
             draft: config,
@@ -156,6 +195,15 @@ impl SettingsScreen {
             openai_embedding_model,
             openai_chat_model,
             openai_health,
+            assessment_health,
+            selected_project_id,
+            context_governance,
+            taxonomy_governance,
+            preparing_context: false,
+            context_notice: None,
+            context_backfill_preview: None,
+            preparing_taxonomy: false,
+            taxonomy_notice: None,
             workspace_bytes: None,
             size_error: None,
             saving: false,
@@ -290,6 +338,370 @@ impl SettingsScreen {
         cx: &mut Context<Self>,
     ) {
         self.openai_health = health;
+        cx.notify();
+    }
+
+    pub(crate) fn update_assessment_health(
+        &mut self,
+        health: AssessmentRuntimeHealthV1,
+        cx: &mut Context<Self>,
+    ) {
+        self.assessment_health = health;
+        cx.notify();
+    }
+
+    pub(crate) fn update_governance(
+        &mut self,
+        selected_project_id: Option<String>,
+        context_governance: AgentContextGovernanceSummaryV1,
+        taxonomy_governance: TaxonomyGovernanceSummaryV1,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_project_id != selected_project_id {
+            self.context_backfill_preview = None;
+            self.context_notice = None;
+            self.taxonomy_notice = None;
+        }
+        self.selected_project_id = selected_project_id;
+        self.context_governance = context_governance;
+        self.taxonomy_governance = taxonomy_governance;
+        cx.notify();
+    }
+
+    fn copy_context_preparation_request(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project_id.as_deref() else {
+            self.context_notice = Some(("Choose one project first.".into(), Theme::AMBER));
+            cx.notify();
+            return;
+        };
+        let request = format!(
+            "Prepare a sourced Perseval agent-specification draft for project {project_id}. Read only repository files I explicitly approve. Preserve field-level source snapshot, locator, sensitivity, provenance, and inference confidence. Mark conflicts and missing human decisions; do not mark inferred values as user-declared and do not activate any release."
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string(request));
+        self.context_notice = Some((
+            "Copied a bounded Codex/MCP preparation request. Paste it into the coding agent that has access to the approved repository.".into(),
+            Theme::GREEN,
+        ));
+        cx.notify();
+    }
+
+    fn prepare_context_from_repository(&mut self, cx: &mut Context<Self>) {
+        if self.preparing_context {
+            return;
+        }
+        let (Some(service), Some(project_id)) =
+            (self.service.clone(), self.selected_project_id.clone())
+        else {
+            self.context_notice = Some(("Choose one project first.".into(), Theme::AMBER));
+            cx.notify();
+            return;
+        };
+        let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
+        self.preparing_context = true;
+        self.context_notice = Some((
+            "Choose the repository directory whose documentation and manifests Perseval may read locally…".into(),
+            Theme::CYAN,
+        ));
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Prepare agent specification".into()),
+        });
+        cx.spawn(async move |weak, cx| {
+            let selected = picker.await;
+            let path = match selected {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                Ok(Ok(None)) | Err(_) => None,
+                Ok(Err(error)) => {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.preparing_context = false;
+                        this.context_notice = Some((
+                            format!("Could not open the repository picker: {error}"),
+                            Theme::RED,
+                        ));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = path else {
+                let _ = weak.update(cx, |this, cx| {
+                    this.preparing_context = false;
+                    this.context_notice = None;
+                    cx.notify();
+                });
+                return;
+            };
+            let task = cx.background_spawn({
+                let service = service.clone();
+                let project_id = project_id.clone();
+                async move {
+                    service.prepare_agent_context_from_repository(
+                        &project_id,
+                        &path,
+                        &reviewer,
+                    )?;
+                    let context = service.agent_context_governance_summary(&project_id)?;
+                    Ok::<_, perseval_service::LiveServiceError>(context)
+                }
+            });
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_context = false;
+                match result {
+                    Ok(context) => {
+                        this.context_governance = context;
+                        this.context_notice = Some((
+                            "Prepared a local sourced draft. Review the purpose, source count, inferred ownership/risk, conflicts, and binding impact before activation.".into(),
+                            Theme::GREEN,
+                        ));
+                    }
+                    Err(error) => {
+                        this.context_notice = Some((error.to_string(), Theme::RED));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn approve_context_draft(&mut self, cx: &mut Context<Self>) {
+        if self.preparing_context {
+            return;
+        }
+        let (Some(service), Some(project_id), Some(draft)) = (
+            self.service.clone(),
+            self.selected_project_id.clone(),
+            self.context_governance.latest_draft.clone(),
+        ) else {
+            return;
+        };
+        let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
+        self.preparing_context = true;
+        self.context_notice = Some((
+            "Activating an immutable specification release…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move {
+            let release_id = service.approve_agent_context_draft(
+                &draft.draft_id,
+                &reviewer,
+                ReviewAuthorityV1::Human,
+            )?;
+            let context = service.agent_context_governance_summary(&project_id)?;
+            Ok::<_, perseval_service::LiveServiceError>((release_id, context))
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_context = false;
+                match result {
+                    Ok((release_id, context)) => {
+                        this.context_governance = context;
+                        this.context_notice = Some((
+                            format!(
+                                "Activated immutable release {}. Configure reviewed trace-binding rules before running context-dependent evaluators.",
+                                short_identity(&release_id)
+                            ),
+                            Theme::GREEN,
+                        ));
+                    }
+                    Err(error) => {
+                        this.context_notice = Some((error.to_string(), Theme::RED));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn preview_context_backfill(&mut self, cx: &mut Context<Self>) {
+        let (Some(service), Some(project_id), Some(context_release_id)) = (
+            self.service.clone(),
+            self.selected_project_id.clone(),
+            self.context_governance.latest_context_release_id.clone(),
+        ) else {
+            return;
+        };
+        self.preparing_context = true;
+        self.context_notice = Some((
+            "Calculating the exact finalized revisions affected by this reviewed default…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move {
+            service.preview_context_backfill(&project_id, &context_release_id)
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_context = false;
+                match result {
+                    Ok(preview) => {
+                        this.context_notice = Some((
+                            format!(
+                                "Preview ready: {} exact finalized revision(s), including {} currently unresolved. No historical binding or assessment has changed.",
+                                preview.affected_revisions.len(),
+                                preview.unresolved_revisions.len()
+                            ),
+                            Theme::GREEN,
+                        ));
+                        this.context_backfill_preview = Some(preview);
+                    }
+                    Err(error) => this.context_notice = Some((error.to_string(), Theme::RED)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_context_backfill(&mut self, cx: &mut Context<Self>) {
+        let (Some(service), Some(preview)) =
+            (self.service.clone(), self.context_backfill_preview.clone())
+        else {
+            return;
+        };
+        let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
+        let project_id = preview.project_id.clone();
+        let context_release_id = preview.context_release_id.clone();
+        let selection_hash = preview.selection_hash.clone();
+        self.preparing_context = true;
+        self.context_notice = Some((
+            "Applying the reviewed default to the exact previewed revisions…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move {
+            let result = service.apply_reviewed_default_context_backfill(
+                &project_id,
+                &context_release_id,
+                &selection_hash,
+                &reviewer,
+                ReviewAuthorityV1::Human,
+            )?;
+            let governance = service.agent_context_governance_summary(&project_id)?;
+            Ok::<_, perseval_service::LiveServiceError>((result, governance))
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_context = false;
+                match result {
+                    Ok((result, governance)) => {
+                        this.context_governance = governance;
+                        this.context_backfill_preview = None;
+                        this.context_notice = Some((
+                            format!(
+                                "Bound {} exact finalized revision(s) through reviewed rule {}. Existing historical bindings remain readable.",
+                                result.bound_revisions.len(),
+                                short_identity(&result.binding_rule_release_id)
+                            ),
+                            Theme::GREEN,
+                        ));
+                    }
+                    Err(error) => this.context_notice = Some((error.to_string(), Theme::RED)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn prepare_taxonomy_from_specification(&mut self, cx: &mut Context<Self>) {
+        let (Some(service), Some(project_id)) =
+            (self.service.clone(), self.selected_project_id.clone())
+        else {
+            return;
+        };
+        let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
+        self.preparing_taxonomy = true;
+        self.taxonomy_notice = Some((
+            "Preparing a sourced definition draft from the active agent specification…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move {
+            service.prepare_taxonomy_from_agent_context(&project_id, &reviewer)?;
+            service.taxonomy_governance_summary(&project_id)
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_taxonomy = false;
+                match result {
+                    Ok(governance) => {
+                        this.taxonomy_governance = governance;
+                        this.taxonomy_notice = Some((
+                            "Prepared an additive definition draft. Review every task/capability name, source, privacy class, and release change before activation.".into(),
+                            Theme::GREEN,
+                        ));
+                    }
+                    Err(error) => this.taxonomy_notice = Some((error.to_string(), Theme::RED)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn approve_taxonomy_draft(&mut self, cx: &mut Context<Self>) {
+        let (Some(service), Some(project_id), Some(draft_id)) = (
+            self.service.clone(),
+            self.selected_project_id.clone(),
+            self.taxonomy_governance.latest_draft_id.clone(),
+        ) else {
+            return;
+        };
+        let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
+        self.preparing_taxonomy = true;
+        self.taxonomy_notice = Some((
+            "Activating the reviewed immutable definition release…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move {
+            let release_id = service.approve_taxonomy_change_draft(
+                &draft_id,
+                &reviewer,
+                ReviewAuthorityV1::Human,
+            )?;
+            let governance = service.taxonomy_governance_summary(&project_id)?;
+            if governance.latest_release_id.as_deref() != Some(release_id.as_str())
+                || governance.latest_draft_id.as_deref() == Some(draft_id.as_str())
+            {
+                return Err(perseval_service::LiveServiceError::Writer(
+                    "the reviewed definition release did not become active; no success state was shown"
+                        .into(),
+                ));
+            }
+            Ok::<_, perseval_service::LiveServiceError>((release_id, governance))
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.preparing_taxonomy = false;
+                match result {
+                    Ok((release_id, governance)) => {
+                        this.taxonomy_governance = governance;
+                        this.taxonomy_notice = Some((
+                            format!(
+                                "Activated immutable definition release {}. Prior releases and assignments remain readable.",
+                                short_identity(&release_id)
+                            ),
+                            Theme::GREEN,
+                        ));
+                    }
+                    Err(error) => this.taxonomy_notice = Some((error.to_string(), Theme::RED)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -482,14 +894,593 @@ impl SettingsScreen {
             SettingsCategory::WorkspaceStorage => div()
                 .child(self.runtime_section(stack_setting_rows, cx))
                 .child(self.storage_section(stack_setting_rows)),
+            SettingsCategory::AgentSpecification => {
+                div().child(self.agent_specification_section(stack_setting_rows, cx))
+            }
+            SettingsCategory::TasksIssueTypes => {
+                div().child(self.tasks_issue_types_section(stack_setting_rows, cx))
+            }
             SettingsCategory::PrivacyPayloads => {
                 div().child(self.privacy_section(stack_setting_rows, cx))
             }
-            SettingsCategory::AiFeatures => {
-                div().child(self.analysis_section(stack_setting_rows, cx))
-            }
+            SettingsCategory::AiFeatures => div()
+                .child(self.learned_assessment_section(stack_setting_rows))
+                .child(self.analysis_section(stack_setting_rows, cx)),
             SettingsCategory::Appearance => div().child(self.appearance_section(cx)),
         }
+    }
+
+    fn agent_specification_section(
+        &self,
+        stack_rows: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let governance = &self.context_governance;
+        let mut view = section(
+            "Agent specification",
+            "Review what the agent is meant to do before learned reviews interpret its traces. Codex/MCP can prepare the sourced draft; only a human can activate it.",
+        );
+        if self.selected_project_id.is_none() {
+            return view.child(notice(
+                "Choose one project",
+                "Agent intent, source approval, releases, and trace bindings are project-scoped. All Projects stays read-only.".into(),
+                Theme::AMBER,
+            ));
+        }
+        if let Some(draft) = governance.latest_draft.as_ref() {
+            let application = draft_context_text(draft, "/identity/application_name/value")
+                .unwrap_or_else(|| "Application name needs review".into());
+            let purpose = draft_context_text(draft, "/intent/purpose/value")
+                .unwrap_or_else(|| "Purpose needs review".into());
+            view = view
+                .child(setting_row(
+                    "Prepared draft",
+                    format!("{} · {}", application, purpose),
+                    stack_rows,
+                ))
+                .child(setting_row(
+                    "Source review",
+                    format!(
+                        "{} approved snapshot(s) · prepared by {}",
+                        governance.source_snapshot_count, draft.created_by
+                    ),
+                    stack_rows,
+                ))
+                .child(setting_row(
+                    "Human decisions",
+                    format!(
+                        "{} unresolved · {} conflicting",
+                        draft.unresolved_field_ids.len(),
+                        draft.conflicting_field_ids.len()
+                    ),
+                    stack_rows,
+                ));
+            if let Some(files) = draft
+                .source_manifest
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+            {
+                for file in files {
+                    let path = file
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("approved source");
+                    let hash = file
+                        .get("sha256")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let bytes = file
+                        .get("bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|bytes| format!(" · {bytes} bytes"))
+                        .unwrap_or_default();
+                    view = view.child(review_row(
+                        "Approved source",
+                        path.to_string(),
+                        format!("SHA-256 {hash}{bytes} · approved local input"),
+                        stack_rows,
+                    ));
+                }
+            }
+            for item in context_review_items(&draft.proposed_context) {
+                view = view.child(review_row(
+                    &format!("Proposed {}", item.label.to_lowercase()),
+                    item.value,
+                    item.detail,
+                    stack_rows,
+                ));
+            }
+        } else if governance.active_release_count == 0 {
+            view = view
+                .child(notice(
+                    "No agent specification yet",
+                    "Start from an explicitly approved repository. Perseval reads bounded documentation and package manifests locally to prepare a sourced draft; Codex/MCP can prepare a richer draft using the copied request. Traces alone never define business intent.".into(),
+                    Theme::AMBER,
+                ))
+                .child(
+                    div()
+                        .mt_4()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(action_button(
+                            if self.preparing_context {
+                                "Preparing…"
+                            } else {
+                                "Prepare from repository…"
+                            },
+                            "Choose an approved repository and prepare a local sourced draft",
+                            !self.preparing_context,
+                            true,
+                            cx.listener(|this, _, _, cx| {
+                                this.prepare_context_from_repository(cx)
+                            }),
+                        ))
+                        .child(action_button(
+                            "Copy Codex/MCP request",
+                            "Copy a bounded sourced-draft request",
+                            !self.preparing_context,
+                            false,
+                            cx.listener(|this, _, _, cx| {
+                                this.copy_context_preparation_request(cx)
+                            }),
+                        )),
+                );
+        } else {
+            view = view.child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action_button(
+                        if self.preparing_context {
+                            "Preparing update…"
+                        } else {
+                            "Prepare update from repository…"
+                        },
+                        "Choose approved sources and prepare a new immutable-version draft",
+                        !self.preparing_context,
+                        false,
+                        cx.listener(|this, _, _, cx| this.prepare_context_from_repository(cx)),
+                    ))
+                    .child(action_button(
+                        "Copy Codex/MCP update request",
+                        "Copy a bounded request that preserves source provenance",
+                        !self.preparing_context,
+                        false,
+                        cx.listener(|this, _, _, cx| this.copy_context_preparation_request(cx)),
+                    )),
+            );
+        }
+        if let Some(draft) = governance.latest_draft.as_ref() {
+            let can_activate = draft.unresolved_field_ids.is_empty()
+                && draft.conflicting_field_ids.is_empty()
+                && !self.preparing_context;
+            view = view.child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action_button(
+                        if self.preparing_context {
+                            "Working…"
+                        } else {
+                            "Approve & activate release"
+                        },
+                        "Human approval creates an immutable agent-specification release",
+                        can_activate,
+                        true,
+                        cx.listener(|this, _, _, cx| this.approve_context_draft(cx)),
+                    ))
+                    .child(action_button(
+                        "Regenerate from repository…",
+                        "Prepare a new sourced draft; the existing draft remains auditable",
+                        !self.preparing_context,
+                        false,
+                        cx.listener(|this, _, _, cx| this.prepare_context_from_repository(cx)),
+                    )),
+            );
+        }
+        view = view
+        .child(setting_row(
+            "Version history",
+            match governance.latest_context_release_id.as_deref() {
+                Some(release) => format!(
+                    "{} immutable release(s) · latest {}",
+                    governance.active_release_count,
+                    short_identity(release)
+                ),
+                None => "No human-activated release".into(),
+            },
+            stack_rows,
+        ))
+        .when_some(
+            governance
+                .latest_draft
+                .is_none()
+                .then_some(governance.latest_context_release.as_ref())
+                .flatten(),
+            |view, release| {
+                let release_json = serde_json::to_value(release).unwrap_or_default();
+                let mut view = view.child(notice(
+                    "Activated specification contents",
+                    "This is the complete current immutable release. Its values stay readable after activation and prior releases remain in version history.".into(),
+                    Theme::CYAN,
+                ));
+                for item in context_review_items(&release_json) {
+                    view = view.child(review_row(
+                        &item.label,
+                        item.value,
+                        item.detail,
+                        stack_rows,
+                    ));
+                }
+                view
+            },
+        )
+        .child(setting_row(
+            "Binding coverage",
+            format!(
+                "{} resolved · {} unresolved · {} ambiguous exact revisions",
+                governance.resolved_bindings,
+                governance.unresolved_bindings,
+                governance.ambiguous_bindings
+            ),
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Safety rule",
+            "Unresolved or ambiguous trace bindings abstain; Perseval never silently uses the newest specification".into(),
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Backfill",
+            "Preview affected revisions first; new bindings never rewrite historical assessments".into(),
+            stack_rows,
+        ))
+        .child(notice(
+            "Human activation required",
+            "Codex and MCP may prepare sourced drafts and update previews. They cannot mark inferred values as user-declared or activate a specification release.".into(),
+            Theme::GREEN,
+        ));
+        if governance.latest_context_release_id.is_some() {
+            view = view.child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action_button(
+                        if self.preparing_context {
+                            "Checking…"
+                        } else {
+                            "Preview trace binding"
+                        },
+                        "Calculate exact finalized revisions before changing the reviewed default",
+                        !self.preparing_context,
+                        self.context_backfill_preview.is_none(),
+                        cx.listener(|this, _, _, cx| this.preview_context_backfill(cx)),
+                    ))
+                    .when_some(
+                        self.context_backfill_preview.as_ref(),
+                        |actions, preview| {
+                            actions.child(action_button(
+                                &format!(
+                                    "Bind {} exact revisions",
+                                    preview.affected_revisions.len()
+                                ),
+                                "Apply only if the preview selection is still exact and current",
+                                !self.preparing_context,
+                                true,
+                                cx.listener(|this, _, _, cx| this.apply_context_backfill(cx)),
+                            ))
+                        },
+                    ),
+            );
+        }
+        if let Some(preview) = self.context_backfill_preview.as_ref() {
+            view = view
+                .child(setting_row(
+                    "Backfill preview",
+                    format!(
+                        "{} exact finalized revisions · {} unresolved · no history rewritten",
+                        preview.affected_revisions.len(),
+                        preview.unresolved_revisions.len()
+                    ),
+                    stack_rows,
+                ))
+                .child(setting_row(
+                    "Selection identity",
+                    short_identity(&preview.selection_hash).into(),
+                    stack_rows,
+                ));
+        }
+        if let Some((message, tint)) = self.context_notice.as_ref() {
+            view = view.child(notice("Agent specification status", message.clone(), *tint));
+        }
+        view
+    }
+
+    fn tasks_issue_types_section(
+        &self,
+        stack_rows: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let governance = &self.taxonomy_governance;
+        let mut view = section(
+            "Tasks, capabilities, and issue types",
+            "Tasks describe intended work; capabilities describe what the agent can do; issue types and review schemas describe how outcomes are interpreted.",
+        );
+        if self.selected_project_id.is_none() {
+            return view.child(notice(
+                "Choose one project",
+                "Definition drafts and releases are project-scoped. All Projects stays read-only."
+                    .into(),
+                Theme::AMBER,
+            ));
+        }
+        if governance.active_release_count == 0 && governance.drafts_in_review == 0 {
+            view = view.child(notice(
+                "No definition library yet",
+                "Codex or learned discovery may prepare a sourced draft. Unknown and novel outcomes remain visible until a human reviews meaning, overlap, counterexamples, privacy, and lineage.".into(),
+                Theme::AMBER,
+            ));
+        }
+        view = view.child(setting_row(
+            "Release status",
+            match governance.latest_release_id.as_deref() {
+                Some(release) => format!(
+                    "{} immutable release(s) · {} active definitions · latest {}",
+                    governance.active_release_count,
+                    governance.active_node_count,
+                    short_identity(release)
+                ),
+                None => format!(
+                    "{} draft(s) awaiting human review",
+                    governance.drafts_in_review
+                ),
+            },
+            stack_rows,
+        ));
+        view = view.child(setting_row(
+            "Pending change",
+            governance
+                .latest_draft_id
+                .as_deref()
+                .map(|draft| format!("Review draft {} before activation", short_identity(draft)))
+                .unwrap_or_else(|| "No prepared change draft".into()),
+            stack_rows,
+        ));
+        if let Some((message, tint)) = self.taxonomy_notice.as_ref() {
+            view = view.child(notice("Definition review status", message.clone(), *tint));
+        }
+        if let Some(draft) = governance.latest_draft.as_ref() {
+            let source_release = draft
+                .source_manifest
+                .get("agent_context_release_id")
+                .and_then(serde_json::Value::as_str)
+                .map(short_identity)
+                .unwrap_or("unknown");
+            let task_count = draft
+                .proposal
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.dimension == perseval_service::analysis::TaxonomyDimensionV1::Task
+                })
+                .count();
+            let capability_count = draft
+                .proposal
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.dimension == perseval_service::analysis::TaxonomyDimensionV1::Capability
+                })
+                .count();
+            let issue_count = draft
+                .proposal
+                .nodes
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node.dimension,
+                        perseval_service::analysis::TaxonomyDimensionV1::FailureMode
+                            | perseval_service::analysis::TaxonomyDimensionV1::RootCause
+                            | perseval_service::analysis::TaxonomyDimensionV1::Severity
+                    )
+                })
+                .count();
+            view = view
+                .child(setting_row(
+                    "Release review",
+                    format!(
+                        "{} proposed definitions · {} lineage change(s) · specification {}",
+                        draft.proposal.nodes.len(),
+                        draft.proposal.lineage.len(),
+                        source_release
+                    ),
+                    stack_rows,
+                ))
+                .child(setting_row(
+                    "Prepared by",
+                    format!("{} · sourced draft only", draft.created_by),
+                    stack_rows,
+                ))
+                .child(setting_row(
+                    "Definition coverage",
+                    format!(
+                        "{task_count} task(s) · {capability_count} capability definition(s) · {issue_count} issue definition(s)"
+                    ),
+                    stack_rows,
+                ));
+            if capability_count == 0 || issue_count == 0 {
+                view = view.child(notice(
+                    "Source-backed coverage only",
+                    "This draft contains only definitions supported by the active agent specification. Missing capabilities stay visibly absent; issue types remain open-set and can be proposed later by learned discovery instead of being invented during onboarding.".into(),
+                    Theme::AMBER,
+                ));
+            }
+            let mut definition_review = div()
+                .id("definition-release-review")
+                .role(Role::Group)
+                .aria_label("Complete definition release review; scroll this list when it is long")
+                .mt_3()
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .pr_2();
+            for node in &draft.proposal.nodes {
+                definition_review = definition_review.child(review_row(
+                    taxonomy_dimension_label(node.dimension),
+                    format!("{}\n{}", node.name, node.description),
+                    format!(
+                        "Stable ID {} · provenance {} · sensitivity {} · state {:?}",
+                        node.node_id, node.provenance, node.sensitivity, node.state
+                    ),
+                    stack_rows,
+                ));
+            }
+            view = view.child(definition_review);
+        } else {
+            for node in &governance.active_nodes {
+                view = view.child(review_row(
+                    taxonomy_dimension_label(node.dimension),
+                    format!("{}\n{}", node.name, node.description),
+                    format!(
+                        "Stable ID {} · provenance {} · sensitivity {} · state {:?}",
+                        node.node_id, node.provenance, node.sensitivity, node.state
+                    ),
+                    stack_rows,
+                ));
+            }
+        }
+        if self.context_governance.latest_context_release_id.is_none() {
+            view = view.child(notice(
+                "Activate the agent specification first",
+                "Definitions must cite a human-activated specification release. Prepare and review that release in Agent specification, then return here.".into(),
+                Theme::AMBER,
+            ));
+        } else {
+            let activation_entity = cx.entity().clone();
+            view = view.child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action_button(
+                        if self.preparing_taxonomy {
+                            "Working…"
+                        } else if governance.latest_draft.is_some() {
+                            "Regenerate from specification"
+                        } else {
+                            "Prepare from agent specification"
+                        },
+                        "Create an additive sourced draft from the active specification",
+                        !self.preparing_taxonomy,
+                        governance.latest_draft.is_none(),
+                        cx.listener(|this, _, _, cx| this.prepare_taxonomy_from_specification(cx)),
+                    ))
+                    .when(governance.latest_draft.is_some(), |actions| {
+                        actions.child(action_button(
+                            "Approve & activate release",
+                            "Human approval activates exactly the reviewed immutable definitions",
+                            !self.preparing_taxonomy,
+                            true,
+                            cx.listener(|this, _, _, cx| this.approve_taxonomy_draft(cx)),
+                        ).on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                            activation_entity.update(cx, |this, cx| {
+                                this.approve_taxonomy_draft(cx)
+                            });
+                        }))
+                    }),
+            );
+        }
+        view = view
+            .child(setting_row(
+                "Stable identity",
+                "Immutable release IDs with explicit rename, merge, split, reparent, and retire lineage".into(),
+                stack_rows,
+            ))
+            .child(setting_row(
+                "Open-set behavior",
+                "Unknown, other, and novel remain first-class states instead of forced categories"
+                    .into(),
+                stack_rows,
+            ))
+            .child(setting_row(
+                "Assignments",
+                "Multi-label, exact-revision, evidence-backed, and scoped to an activated taxonomy release".into(),
+                stack_rows,
+            ))
+            .child(notice(
+                "Draft before release",
+                "Learned discovery and Codex can propose definitions. A human release review owns overlap, counterexamples, privacy, lineage, and activation impact.".into(),
+                Theme::CYAN,
+            ));
+        view
+    }
+
+    fn learned_assessment_section(&self, stack_rows: bool) -> impl IntoElement {
+        let health = &self.assessment_health;
+        section(
+            "Learned automated reviews",
+            "A separate durable worker evaluates selected finalized trace revisions. Deterministic findings may be evidence, but never decide eligibility.",
+        )
+        .child(setting_row(
+            "Worker",
+            if self.runtime_config.assessments.enabled {
+                format!("Running · {} active · {} waiting", health.running, health.pending)
+            } else {
+                "Disabled in this process".into()
+            },
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Terminal accounting",
+            format!(
+                "{} total · {} succeeded · {} abstained · {} failed · {} cancelled",
+                health.terminal,
+                health.succeeded,
+                health.abstained,
+                health.failed,
+                health.cancelled
+            ),
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Could not execute",
+            format!(
+                "{} context-unresolved · {} budget-blocked · {} privacy-blocked · {} provider-unavailable · {} not-applicable",
+                health.context_unresolved,
+                health.budget_blocked,
+                health.privacy_blocked,
+                health.provider_unavailable,
+                health.not_applicable
+            ),
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Attempts and spend",
+            format!(
+                "{} retried attempt(s) · {} total model latency · {} spent",
+                health.retry_count,
+                format_duration_ms(health.total_latency_ms),
+                format_cost_micros(health.total_cost_micros)
+            ),
+            stack_rows,
+        ))
+        .child(setting_row(
+            "Release identity",
+            "Evaluator + exact trace revision + context binding + projection + provider/model".into(),
+            stack_rows,
+        ))
+        .child(notice(
+            "No placeholder judge",
+            "PV-01 supplies the trustworthy runtime. Until a task-specific evaluator is installed, selected traces finish with an explicit context or provider abstention and no model call.".into(),
+            Theme::AMBER,
+        ))
     }
 
     fn storage_section(&self, stack_rows: bool) -> impl IntoElement {
@@ -1058,6 +2049,234 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn short_identity(value: &str) -> &str {
+    value.get(..value.len().min(18)).unwrap_or(value)
+}
+
+fn taxonomy_dimension_label(
+    dimension: perseval_service::analysis::TaxonomyDimensionV1,
+) -> &'static str {
+    use perseval_service::analysis::TaxonomyDimensionV1::*;
+    match dimension {
+        Task => "Task",
+        Capability => "Capability",
+        SuccessCriterion => "Success criterion",
+        NonGoal => "Non-goal",
+        Policy => "Policy",
+        Risk => "Risk",
+        Escalation => "Escalation",
+        FailureMode => "Issue type",
+        RootCause => "Root cause",
+        Severity => "Severity",
+    }
+}
+
+fn format_duration_ms(value: u64) -> String {
+    if value >= 1_000 {
+        format!("{:.1}s", value as f64 / 1_000.0)
+    } else {
+        format!("{value}ms")
+    }
+}
+
+fn format_cost_micros(value: u64) -> String {
+    format!("${:.4}", value as f64 / 1_000_000.0)
+}
+
+fn draft_context_text(
+    draft: &perseval_service::AgentContextDraftV1,
+    pointer: &str,
+) -> Option<String> {
+    let value = draft.proposed_context.pointer(pointer)?;
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| (!value.is_null()).then(|| value.to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextReviewItem {
+    label: String,
+    value: String,
+    detail: String,
+}
+
+fn context_review_items(context: &serde_json::Value) -> Vec<ContextReviewItem> {
+    let mut items = Vec::new();
+    collect_context_review_items(context, &mut Vec::new(), &mut items);
+    items
+}
+
+fn collect_context_review_items(
+    value: &serde_json::Value,
+    path: &mut Vec<String>,
+    items: &mut Vec<ContextReviewItem>,
+) {
+    match value {
+        serde_json::Value::Object(object) if object.get("field_id").is_some() => {
+            let label = context_review_label(path, object);
+            let visible_value = context_review_value(object);
+            let mut details = Vec::new();
+            for (label, key) in [
+                ("Source", "source_locator"),
+                ("Provenance", "provenance"),
+                ("Review", "review_state"),
+                ("Sensitivity", "sensitivity"),
+                ("Field ID", "field_id"),
+            ] {
+                if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+                    details.push(format!("{label}: {value}"));
+                }
+            }
+            if let Some(confidence) = object
+                .get("inference_confidence")
+                .and_then(serde_json::Value::as_f64)
+            {
+                details.push(format!(
+                    "Inference confidence: {confidence:.0}%",
+                    confidence = confidence * 100.0
+                ));
+            }
+            items.push(ContextReviewItem {
+                label,
+                value: visible_value,
+                detail: details.join(" · "),
+            });
+        }
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if matches!(key.as_str(), "schema_version" | "agent_id") {
+                    continue;
+                }
+                path.push(key.clone());
+                collect_context_review_items(child, path, items);
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_context_review_items(child, path, items);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn context_review_label(
+    path: &[String],
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    if object.get("capability_id").is_some() {
+        return "Capability".into();
+    }
+    if object.get("criterion_id").is_some() {
+        return "Success criterion".into();
+    }
+    let key = path.last().map(String::as_str).unwrap_or("context");
+    match key {
+        "application_name" => "Application name".into(),
+        "owner" => "Owner".into(),
+        "environment" => "Environment".into(),
+        "risk_tier" => "Risk tier".into(),
+        "purpose" => "Purpose".into(),
+        "supported_tasks" => "Task".into(),
+        "explicit_non_goals" => "Non-goal".into(),
+        "acceptable_partial_completion" => "Acceptable partial completion".into(),
+        "refusal_requirements" => "Refusal requirement".into(),
+        "escalation_requirements" => "Escalation requirement".into(),
+        "build_version_selectors" => "Build selector".into(),
+        "entry_points" => "Entry point".into(),
+        "user_personas" => "User persona".into(),
+        "supported_domains" => "Supported domain".into(),
+        "languages" => "Language".into(),
+        "routers" => "Router".into(),
+        "sub_agents" => "Sub-agent".into(),
+        "memory" => "Memory".into(),
+        "retrieval_data_sources" => "Retrieval data source".into(),
+        "human_handoffs" => "Human handoff".into(),
+        "external_services" => "External service".into(),
+        "expected_causal_topology" => "Expected trace topology".into(),
+        "data_classifications" => "Data classification".into(),
+        "retention_rules" => "Retention rule".into(),
+        "redaction_rules" => "Redaction rule".into(),
+        "external_provider_permissions" => "Provider permission".into(),
+        "compliance_constraints" => "Compliance constraint".into(),
+        "learned_feature_content" => "Learned-feature content rule".into(),
+        "reusable_rubrics" => "Reusable rubric".into(),
+        "safe_positive_examples" => "Safe positive example".into(),
+        "safe_negative_examples" => "Safe negative example".into(),
+        "known_limitations" => "Known limitation".into(),
+        "required_evidence_types" => "Required evidence type".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn context_review_value(object: &serde_json::Map<String, serde_json::Value>) -> String {
+    if let Some(value) = object.get("value") {
+        return display_review_json(value);
+    }
+    if let Some(description) = object
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+    {
+        let importance = object
+            .get("importance")
+            .and_then(serde_json::Value::as_str)
+            .map(|importance| format!(" · {importance}"))
+            .unwrap_or_default();
+        return format!("{description}{importance}");
+    }
+    if let Some(name) = object.get("name").and_then(serde_json::Value::as_str) {
+        let mut parts = vec![name.to_string()];
+        for (label, key) in [
+            ("Kind", "kind"),
+            ("Effect", "effect"),
+            ("Idempotency", "idempotency"),
+        ] {
+            if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+                parts.push(format!("{label}: {value}"));
+            }
+        }
+        if object
+            .get("requires_approval")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            parts.push("Human approval required".into());
+        }
+        for (label, key) in [
+            ("Permissions", "permissions"),
+            ("Allowed operations", "allowed_operations"),
+            ("Prohibited operations", "prohibited_operations"),
+            ("Required preconditions", "required_preconditions"),
+            ("Budgets", "budgets"),
+        ] {
+            if let Some(value) = object.get(key).filter(|value| match value {
+                serde_json::Value::Array(values) => !values.is_empty(),
+                serde_json::Value::Object(values) => !values.is_empty(),
+                _ => !value.is_null(),
+            }) {
+                parts.push(format!("{label}: {}", display_review_json(value)));
+            }
+        }
+        return parts.join(" · ");
+    }
+    display_review_json(&serde_json::Value::Object(object.clone()))
+}
+
+fn display_review_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(display_review_json)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Null => "Not specified".into(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{InputEvent, ScrollDelta, ScrollWheelEvent, TestAppContext, point, px};
@@ -1071,15 +2290,51 @@ mod tests {
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
     }
 
+    #[test]
+    fn immutable_context_review_keeps_complete_values_and_provenance() {
+        let long_task = "Inspect the complete customer request, verify the referenced order, explain every eligibility decision, and request human approval before any refund is issued.";
+        let context = serde_json::json!({
+            "intent": {
+                "supported_tasks": [{
+                    "field_id": "task.inspect-and-return",
+                    "provenance": "config_import",
+                    "source_snapshot_id": "sha256:source",
+                    "source_locator": "README.md#tasks",
+                    "captured_at": "2026-07-19T00:00:00Z",
+                    "review_state": "approved",
+                    "sensitivity": "public",
+                    "inference_confidence": 0.91,
+                    "value": long_task
+                }]
+            }
+        });
+        let items = context_review_items(&context);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Task");
+        assert_eq!(items[0].value, long_task);
+        assert!(items[0].detail.contains("README.md#tasks"));
+        assert!(
+            items[0]
+                .detail
+                .contains("Field ID: task.inspect-and-return")
+        );
+        assert!(items[0].detail.contains("Inference confidence: 91%"));
+    }
+
     #[gpui::test]
     fn editable_settings_validate_and_update_the_draft(cx: &mut TestAppContext) {
         let screen = cx.new(|cx| {
             let mut config = PersevalConfigV1::default();
             config.otlp.enabled = false;
             SettingsScreen::new(
+                None,
                 config,
                 AppearancePreferencesV1::default(),
                 OpenAiProviderHealthV1::default(),
+                AssessmentRuntimeHealthV1::default(),
+                None,
+                AgentContextGovernanceSummaryV1::default(),
+                TaxonomyGovernanceSummaryV1::default(),
                 cx,
             )
         });
@@ -1103,9 +2358,14 @@ mod tests {
     fn hosted_feature_toggles_keep_dependencies_explicit(cx: &mut TestAppContext) {
         let screen = cx.new(|cx| {
             SettingsScreen::new(
+                None,
                 PersevalConfigV1::default(),
                 AppearancePreferencesV1::default(),
                 OpenAiProviderHealthV1::default(),
+                AssessmentRuntimeHealthV1::default(),
+                None,
+                AgentContextGovernanceSummaryV1::default(),
+                TaxonomyGovernanceSummaryV1::default(),
                 cx,
             )
         });
@@ -1130,9 +2390,14 @@ mod tests {
     fn settings_categories_keep_each_workflow_focused(cx: &mut TestAppContext) {
         let screen = cx.new(|cx| {
             SettingsScreen::new(
+                None,
                 PersevalConfigV1::default(),
                 AppearancePreferencesV1::default(),
                 OpenAiProviderHealthV1::default(),
+                AssessmentRuntimeHealthV1::default(),
+                None,
+                AgentContextGovernanceSummaryV1::default(),
+                TaxonomyGovernanceSummaryV1::default(),
                 cx,
             )
         });
@@ -1149,9 +2414,14 @@ mod tests {
     fn settings_content_has_a_real_scroll_extent(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, cx| {
             SettingsScreen::new(
+                None,
                 PersevalConfigV1::default(),
                 AppearancePreferencesV1::default(),
                 OpenAiProviderHealthV1::default(),
+                AssessmentRuntimeHealthV1::default(),
+                None,
+                AgentContextGovernanceSummaryV1::default(),
+                TaxonomyGovernanceSummaryV1::default(),
                 cx,
             )
         });

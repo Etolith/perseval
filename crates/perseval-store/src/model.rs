@@ -26,6 +26,7 @@ pub const RUN_COMPARISON_REQUEST_SCHEMA_VERSION: &str = "perseval.run_comparison
 pub const EVAL_CANDIDATE_RECORD_SCHEMA_VERSION: &str = "perseval.eval_candidate_record.v1";
 pub const PIPELINE_DIAGNOSTICS_SCHEMA_VERSION: &str = "perseval.pipeline_diagnostics.v2";
 pub const QUERY_SCOPE_SCHEMA_VERSION: &str = "perseval.query_scope.v1";
+pub const ASSESSMENT_JOB_EXPORT_SCHEMA_VERSION: &str = "perseval.assessment_job_export.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1029,6 +1030,314 @@ pub struct TopologyProjectionRowV1 {
     pub order: u64,
     pub depth: u32,
     pub has_children: bool,
+}
+
+pub const AGENT_CONTEXT_DRAFT_SCHEMA_VERSION: &str = "perseval.agent_context_draft.v1";
+pub const ASSESSMENT_JOB_SCHEMA_VERSION: &str = "perseval.assessment_job.v1";
+pub const ASSESSMENT_RECORD_SCHEMA_VERSION: &str = "perseval.assessment_record.v1";
+pub const PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION: &str = "perseval.project_assessment_policy.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAuthorityV1 {
+    Human,
+    McpAgent,
+    Importer,
+}
+
+/// A mutable, review-only proposal. Activation always materializes an immutable
+/// `AgentContextReleaseV1`; drafts are never valid evaluator inputs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentContextDraftV1 {
+    pub schema_version: String,
+    pub draft_id: String,
+    pub project_id: String,
+    pub agent_id: String,
+    pub source_snapshot_id: String,
+    pub source_manifest: serde_json::Value,
+    pub proposed_context: serde_json::Value,
+    pub unresolved_field_ids: Vec<String>,
+    pub conflicting_field_ids: Vec<String>,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AgentContextGovernanceSummaryV1 {
+    pub project_id: String,
+    pub source_snapshot_count: u64,
+    pub drafts_in_review: u64,
+    pub active_release_count: u64,
+    pub latest_draft: Option<AgentContextDraftV1>,
+    pub latest_context_release_id: Option<String>,
+    pub latest_context_release: Option<traces_to_evals::AgentContextReleaseV1>,
+    pub resolved_bindings: u64,
+    pub unresolved_bindings: u64,
+    pub ambiguous_bindings: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TaxonomyGovernanceSummaryV1 {
+    pub project_id: String,
+    pub drafts_in_review: u64,
+    pub active_release_count: u64,
+    pub active_node_count: u64,
+    pub latest_draft_id: Option<String>,
+    pub latest_release_id: Option<String>,
+    pub latest_draft: Option<TaxonomyChangeDraftRecordV1>,
+    pub active_nodes: Vec<traces_to_evals::TaxonomyNodeV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaxonomyChangeDraftRecordV1 {
+    pub draft_id: String,
+    pub project_id: String,
+    pub base_release_id: Option<String>,
+    pub proposal: traces_to_evals::AgentTaxonomyReleaseV1,
+    pub source_manifest: serde_json::Value,
+    pub created_by: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextBindingStatusV1 {
+    Resolved,
+    Unresolved,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBindingRecordV1 {
+    pub binding_id: String,
+    pub project_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub status: ContextBindingStatusV1,
+    pub context_release_id: Option<String>,
+    pub binding_rule_release_id: String,
+    pub binding_json: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBackfillPreviewV1 {
+    pub project_id: String,
+    pub context_release_id: String,
+    pub selection_hash: String,
+    pub affected_revisions: Vec<(String, u64)>,
+    pub unresolved_revisions: Vec<(String, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBackfillResultV1 {
+    pub project_id: String,
+    pub context_release_id: String,
+    pub binding_rule_release_id: String,
+    pub selection_hash: String,
+    pub bound_revisions: Vec<(String, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBindingSelectorV1 {
+    pub selector_id: String,
+    pub agent_id: Option<String>,
+    pub build_id: Option<String>,
+    pub environment: Option<String>,
+    pub context_release_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBindingRuleSetV1 {
+    pub project_id: String,
+    pub selectors: Vec<ContextBindingSelectorV1>,
+    pub reviewed_default_context_release_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAssessmentPolicyV1 {
+    pub schema_version: String,
+    pub project_id: String,
+    pub provider_enabled: bool,
+    pub daily_budget_micros: u64,
+    pub per_attempt_budget_micros: u64,
+    pub lease_duration_ms: u64,
+    pub maximum_attempts: u32,
+    pub updated_by: String,
+    pub updated_at_unix_ms: i64,
+}
+
+impl ProjectAssessmentPolicyV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != PROJECT_ASSESSMENT_POLICY_SCHEMA_VERSION {
+            return Err("unsupported project assessment policy schema version".into());
+        }
+        if self.project_id.trim().is_empty() || self.updated_by.trim().is_empty() {
+            return Err("project_id and updated_by must not be empty".into());
+        }
+        if self.lease_duration_ms == 0 || self.maximum_attempts == 0 {
+            return Err("lease duration and maximum attempts must be greater than zero".into());
+        }
+        if self.per_attempt_budget_micros > self.daily_budget_micros {
+            return Err("per-attempt budget cannot exceed the daily budget".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentJobStatusV1 {
+    Pending,
+    Running,
+    Completed,
+    Partial,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentItemStatusV1 {
+    Pending,
+    Running,
+    Succeeded,
+    Abstained,
+    Failed,
+    Cancelled,
+    BudgetBlocked,
+    PrivacyBlocked,
+    ProviderUnavailable,
+    NotApplicable,
+}
+
+impl AssessmentItemStatusV1 {
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssessmentJobV1 {
+    pub schema_version: String,
+    pub job_id: String,
+    pub project_id: String,
+    pub evaluator_release_id: String,
+    pub idempotency_key: String,
+    pub selection_hash: String,
+    pub status: AssessmentJobStatusV1,
+    pub item_count: u64,
+    pub terminal_count: u64,
+    pub cancelled_at_unix_ms: Option<i64>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimedAssessmentItemV1 {
+    pub item_id: String,
+    pub job_id: String,
+    pub project_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub evaluator_release_id: String,
+    pub context_binding_id: String,
+    pub context_release_id: Option<String>,
+    pub projection_hash: String,
+    pub cache_key: String,
+    pub attempt_id: String,
+    pub attempt_number: u32,
+    pub lease_owner: String,
+    pub lease_expires_at_unix_ms: i64,
+    pub reserved_cost_micros: u64,
+    /// A durable preflight result. Workers must commit this without invoking an
+    /// evaluator or provider, preserving explicit non-executable accounting.
+    pub preflight_status: Option<AssessmentItemStatusV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssessmentCommitV1 {
+    pub status: AssessmentItemStatusV1,
+    pub evaluation: Option<traces_to_evals::LearnedEvaluationV1>,
+    pub evidence_catalog: Option<traces_to_evals::EvaluationEvidenceCatalogV1>,
+    pub provider_response: Option<traces_to_evals::ProviderResponseEnvelopeV1>,
+    pub provider_failure: Option<traces_to_evals::ProviderExecutionFailureV1>,
+    pub charged_cost_micros: u64,
+    pub latency_ms: u64,
+    pub retryable: bool,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssessmentRecordV1 {
+    pub schema_version: String,
+    pub assessment_id: String,
+    pub item_id: String,
+    pub project_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub evaluator_release_id: String,
+    pub context_binding_id: String,
+    pub context_release_id: Option<String>,
+    pub projection_hash: String,
+    pub provider: Option<String>,
+    pub requested_model: Option<String>,
+    pub returned_model: Option<String>,
+    pub status: AssessmentItemStatusV1,
+    pub evaluation: Option<traces_to_evals::LearnedEvaluationV1>,
+    pub cost_micros: u64,
+    pub latency_ms: u64,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssessmentJobItemExportV1 {
+    pub item_id: String,
+    pub logical_trace_id: String,
+    pub revision: u64,
+    pub context_binding_id: String,
+    pub context_release_id: Option<String>,
+    pub projection_hash: String,
+    pub status: AssessmentItemStatusV1,
+    pub attempt_count: u32,
+    pub terminal_reason: Option<String>,
+    pub assessment: Option<AssessmentRecordV1>,
+}
+
+/// A stable, machine-readable accounting artifact for an exact assessment run.
+/// It includes terminal items that never called a model, so provider, privacy,
+/// budget, cancellation, and retry failures cannot silently disappear from an
+/// export the way optional table columns can.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssessmentJobExportV1 {
+    pub schema_version: String,
+    pub job: AssessmentJobV1,
+    pub status_counts: BTreeMap<String, u64>,
+    pub total_cost_micros: u64,
+    pub total_latency_ms: u64,
+    pub items: Vec<AssessmentJobItemExportV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AssessmentRuntimeHealthV1 {
+    pub pending: u64,
+    pub running: u64,
+    pub terminal: u64,
+    pub succeeded: u64,
+    pub abstained: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+    pub budget_blocked: u64,
+    pub privacy_blocked: u64,
+    pub provider_unavailable: u64,
+    pub not_applicable: u64,
+    pub context_unresolved: u64,
+    pub retry_count: u64,
+    pub total_cost_micros: u64,
+    pub total_latency_ms: u64,
+    pub last_error: Option<String>,
 }
 
 #[cfg(test)]

@@ -183,6 +183,7 @@ impl WorkbenchShell {
                 this.eval_review.update(cx, |evals, cx| {
                     evals.set_project_scope(Some(project.project_id.clone()), cx)
                 });
+                this.refresh_settings_governance(cx);
                 this.refresh_welcome_context(cx);
                 this.persist();
                 cx.notify();
@@ -378,6 +379,7 @@ impl WorkbenchShell {
                 );
                 this.failure_inbox.update(cx, |inbox, cx| {
                     inbox.show_full_trace(
+                        project_id,
                         logical_trace_id,
                         *revision,
                         FullTraceOrigin::Runs,
@@ -403,6 +405,7 @@ impl WorkbenchShell {
                     inbox.set_query_scope(scope, cx);
                     inbox.set_preferences(preferences, cx);
                 });
+                this.refresh_settings_governance(cx);
                 this.persist();
                 cx.notify();
             }
@@ -465,6 +468,7 @@ impl WorkbenchShell {
                 );
                 this.failure_inbox.update(cx, |inbox, cx| {
                     inbox.show_full_trace(
+                        project_id,
                         logical_trace_id,
                         *revision,
                         FullTraceOrigin::Runs,
@@ -563,6 +567,7 @@ impl WorkbenchShell {
             &eval_review,
             cx,
         );
+        let settings_project_id = selected_project_id.clone();
         let welcome = cx.new(|_| {
             WelcomeScreen::new(
                 projects.len(),
@@ -580,11 +585,27 @@ impl WorkbenchShell {
         })
         .detach();
         let appearance = model.state.appearance.clone();
+        let assessment_health = service
+            .assessment_runtime_health_for_project(settings_project_id.as_deref())
+            .unwrap_or_default();
+        let context_governance = settings_project_id
+            .as_deref()
+            .and_then(|project_id| service.agent_context_governance_summary(project_id).ok())
+            .unwrap_or_default();
+        let taxonomy_governance = settings_project_id
+            .as_deref()
+            .and_then(|project_id| service.taxonomy_governance_summary(project_id).ok())
+            .unwrap_or_default();
         let settings = cx.new(|cx| {
             settings::SettingsScreen::new(
+                Some(service.clone()),
                 config.clone(),
                 appearance.clone(),
                 health.openai.clone(),
+                assessment_health,
+                settings_project_id,
+                context_governance,
+                taxonomy_governance,
                 cx,
             )
         });
@@ -628,8 +649,33 @@ impl WorkbenchShell {
                         this.sources
                             .update(cx, |sources, cx| sources.update_health(health, cx));
                         let openai_health = this.health.openai.clone();
+                        let selected_project_id = this.selected_project_id().map(str::to_owned);
+                        let assessment_health = status_service
+                            .assessment_runtime_health_for_project(selected_project_id.as_deref())
+                            .unwrap_or_default();
+                        let context_governance = selected_project_id
+                            .as_deref()
+                            .and_then(|project_id| {
+                                status_service
+                                    .agent_context_governance_summary(project_id)
+                                    .ok()
+                            })
+                            .unwrap_or_default();
+                        let taxonomy_governance = selected_project_id
+                            .as_deref()
+                            .and_then(|project_id| {
+                                status_service.taxonomy_governance_summary(project_id).ok()
+                            })
+                            .unwrap_or_default();
                         this.settings.update(cx, |settings, cx| {
-                            settings.update_openai_health(openai_health, cx)
+                            settings.update_openai_health(openai_health, cx);
+                            settings.update_assessment_health(assessment_health, cx);
+                            settings.update_governance(
+                                selected_project_id,
+                                context_governance,
+                                taxonomy_governance,
+                                cx,
+                            );
                         });
                         this.refresh_welcome_context(cx);
                         cx.notify();
@@ -719,6 +765,35 @@ impl WorkbenchShell {
         });
     }
 
+    fn refresh_settings_governance(&mut self, cx: &mut Context<Self>) {
+        let selected_project_id = self.selected_project_id().map(str::to_owned);
+        let assessment_health = self
+            .service
+            .assessment_runtime_health_for_project(selected_project_id.as_deref())
+            .unwrap_or_default();
+        let context_governance = selected_project_id
+            .as_deref()
+            .and_then(|project_id| {
+                self.service
+                    .agent_context_governance_summary(project_id)
+                    .ok()
+            })
+            .unwrap_or_default();
+        let taxonomy_governance = selected_project_id
+            .as_deref()
+            .and_then(|project_id| self.service.taxonomy_governance_summary(project_id).ok())
+            .unwrap_or_default();
+        self.settings.update(cx, |settings, cx| {
+            settings.update_assessment_health(assessment_health, cx);
+            settings.update_governance(
+                selected_project_id,
+                context_governance,
+                taxonomy_governance,
+                cx,
+            );
+        });
+    }
+
     fn toggle_project_menu(&mut self, cx: &mut Context<Self>) {
         self.view_menu_open = false;
         self.project_menu_open = !self.project_menu_open;
@@ -777,6 +852,7 @@ impl WorkbenchShell {
                 sources.select_all_projects(cx);
             }
         });
+        self.refresh_settings_governance(cx);
         self.refresh_welcome_context(cx);
         self.sync_failure_view(cx);
         self.project_menu_open = false;
@@ -895,14 +971,21 @@ fn sync_editor_resource(
             });
         }
         Some(EditorResource::FullTrace {
+            project_id,
             logical_trace_id,
             revision,
             origin,
             selected_span_id,
-            ..
         }) => {
             failure_inbox.update(cx, |inbox, cx| {
-                inbox.show_full_trace(&logical_trace_id, revision, origin, selected_span_id, cx)
+                inbox.show_full_trace(
+                    &project_id,
+                    &logical_trace_id,
+                    revision,
+                    origin,
+                    selected_span_id,
+                    cx,
+                )
             });
         }
         Some(EditorResource::EvalQueue) => {
