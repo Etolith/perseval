@@ -145,20 +145,52 @@ fn run_order_indexes_cover_workspace_and_project_sorts() {
         .unwrap();
     assert!(migrated);
 
-    for (ordering, expected_index) in [
+    for (project_predicate, project_id, ordering, expected_index) in [
         (
+            "?2 = ''",
+            "",
+            "start_time_unix_nano DESC, logical_trace_id ASC",
+            "idx_traces_workspace_started_desc",
+        ),
+        (
+            "?2 = ''",
+            "",
+            "start_time_unix_nano ASC, logical_trace_id ASC",
+            "idx_traces_workspace_started_asc",
+        ),
+        (
+            "?2 = ''",
+            "",
+            "span_count DESC, start_time_unix_nano DESC, logical_trace_id ASC",
+            "idx_traces_workspace_spans",
+        ),
+        (
+            "?2 = ''",
+            "",
+            "finding_count DESC, start_time_unix_nano DESC, logical_trace_id ASC",
+            "idx_traces_workspace_findings",
+        ),
+        (
+            "project_id = ?2",
+            "project-a",
             "start_time_unix_nano DESC, logical_trace_id ASC",
             "idx_traces_workspace_project_started_desc",
         ),
         (
+            "project_id = ?2",
+            "project-a",
             "start_time_unix_nano ASC, logical_trace_id ASC",
             "idx_traces_workspace_project_started_asc",
         ),
         (
+            "project_id = ?2",
+            "project-a",
             "span_count DESC, start_time_unix_nano DESC, logical_trace_id ASC",
             "idx_traces_workspace_project_spans",
         ),
         (
+            "project_id = ?2",
+            "project-a",
             "finding_count DESC, start_time_unix_nano DESC, logical_trace_id ASC",
             "idx_traces_workspace_project_findings",
         ),
@@ -167,11 +199,11 @@ fn run_order_indexes_cover_workspace_and_project_sorts() {
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN
                  SELECT logical_trace_id FROM logical_traces
-                  WHERE workspace_id = ?1 AND project_id = ?2
+                  WHERE workspace_id = ?1 AND {project_predicate}
                   ORDER BY {ordering} LIMIT ?3 OFFSET ?4"
             ))
             .unwrap()
-            .query_map(params!["test", "project-a", 100_i64, 0_i64], |row| {
+            .query_map(params!["test", project_id, 100_i64, 0_i64], |row| {
                 row.get::<_, String>(3)
             })
             .unwrap()
