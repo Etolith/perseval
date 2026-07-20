@@ -424,7 +424,13 @@ impl WorkspaceStore {
                      ON CONFLICT(sha256) DO NOTHING",
                 )?;
             }
+            let mut ensured_logical_traces = BTreeSet::new();
             for span in &batch.spans {
+                let first_for_trace = ensured_logical_traces.insert(span.logical_trace_id.clone());
+                let is_root = span.external_parent_span_id.is_none();
+                if !first_for_trace && !is_root {
+                    continue;
+                }
                 let (revision, reopened) =
                     ensure_logical_trace(&transaction, &self.workspace_id, span, now)?;
                 trace_revisions
