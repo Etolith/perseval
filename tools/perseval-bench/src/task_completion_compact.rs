@@ -734,6 +734,27 @@ fn render_sections(
     ]
 }
 
+pub(super) fn render_projection_prompt(projection: &CompactTaskCompletionProjectionV1) -> String {
+    let all_count = projection
+        .stats
+        .included_facts
+        .saturating_add(projection.stats.omitted_facts) as usize;
+    render_sections(projection, all_count).concat()
+}
+
+pub(super) fn render_projection_evidence(projection: &CompactTaskCompletionProjectionV1) -> String {
+    let all_count = projection
+        .stats
+        .included_facts
+        .saturating_add(projection.stats.omitted_facts) as usize;
+    let sections = render_sections(projection, all_count);
+    sections[1..]
+        .join("")
+        .trim_end_matches("Decision:")
+        .trim_end()
+        .to_string()
+}
+
 async fn cumulative_section_counts<C: TokenCounter>(
     tokenizer: &C,
     sections: &[String; 7],

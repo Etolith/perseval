@@ -29,6 +29,7 @@ gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "20340e14874a3b55122e
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "20340e14874a3b55122e5cb2aa0d023874e08b2d", package = "gpui_platform", features = ["font-kit"] }
 hex = "0.4"
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "with-serde"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls", "api-24"] }
 perseval-ingest = { path = "crates/perseval-ingest" }
 perseval-service = { path = "crates/perseval-service" }
 perseval-store = { path = "crates/perseval-store" }
@@ -43,6 +44,7 @@ sha2 = "0.10"
 thiserror = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 toml = "0.9"
 tower = "0.5"
 traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "c21dc6dd4de873bd22a415f93330e63018f7024d", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }

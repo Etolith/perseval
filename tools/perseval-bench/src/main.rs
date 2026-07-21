@@ -22,6 +22,7 @@ mod replay;
 mod score;
 mod task_completion;
 mod task_completion_compact;
+mod task_completion_models;
 
 #[derive(Debug, Serialize)]
 struct SourceColumn {
@@ -453,6 +454,188 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-smollm-run" => {
+            let projections = args.next().ok_or_else(|| {
+                "task-completion-smollm-run requires compact projections".to_string()
+            })?;
+            let output = args
+                .next()
+                .ok_or_else(|| "task-completion-smollm-run requires an output".to_string())?;
+            let model_id = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-smollm-run requires a model id".to_string())?;
+            let model_hash = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-smollm-run requires a model hash".to_string())?;
+            let threshold = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "threshold is not UTF-8".to_string())?
+                        .parse::<f64>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or(0.5);
+            let concurrency = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "concurrency is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or(4);
+            let limit = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "limit is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion_models::run_smollm(
+                Path::new(&projections),
+                Path::new(&output),
+                &model_id,
+                &model_hash,
+                threshold,
+                concurrency,
+                limit,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        "task-completion-modernbert-nli-run" => {
+            let projections = args.next().ok_or_else(|| {
+                "task-completion-modernbert-nli-run requires compact projections".to_string()
+            })?;
+            let output = args.next().ok_or_else(|| {
+                "task-completion-modernbert-nli-run requires an output".to_string()
+            })?;
+            let model_path = args.next().ok_or_else(|| {
+                "task-completion-modernbert-nli-run requires an ONNX model".to_string()
+            })?;
+            let tokenizer_path = args.next().ok_or_else(|| {
+                "task-completion-modernbert-nli-run requires a tokenizer".to_string()
+            })?;
+            let model_id = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-modernbert-nli-run requires a model id".to_string()
+                })?;
+            let model_hash = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-modernbert-nli-run requires a model hash".to_string()
+                })?;
+            let tokenizer_hash = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-modernbert-nli-run requires a tokenizer hash".to_string()
+                })?;
+            let neutral_policy = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-modernbert-nli-run requires a neutral policy".to_string()
+                })?;
+            let threshold = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "threshold is not UTF-8".to_string())?
+                        .parse::<f64>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?
+                .unwrap_or(0.5);
+            let limit = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "limit is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion_models::run_modernbert_nli(
+                Path::new(&projections),
+                Path::new(&output),
+                Path::new(&model_path),
+                Path::new(&tokenizer_path),
+                &model_id,
+                &model_hash,
+                &tokenizer_hash,
+                &neutral_policy,
+                threshold,
+                limit,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        "task-completion-binary-score" | "task-completion-binary-calibrate" => {
+            let results = args
+                .next()
+                .ok_or_else(|| format!("{command} requires binary model results"))?;
+            let labels = args
+                .next()
+                .ok_or_else(|| format!("{command} requires resolution labels"))?;
+            let split = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| format!("{command} requires a split"))?;
+            let output = args
+                .next()
+                .ok_or_else(|| format!("{command} requires an output report"))?;
+            let threshold = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "threshold is not UTF-8".to_string())?
+                        .parse::<f64>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            if args.next().is_some()
+                || (command == "task-completion-binary-calibrate" && threshold.is_some())
+            {
+                return Err(usage(&program).into());
+            }
+            let report = if command == "task-completion-binary-calibrate" {
+                task_completion_models::calibrate(Path::new(&results), Path::new(&labels), &split)?
+            } else {
+                task_completion_models::score(
+                    Path::new(&results),
+                    Path::new(&labels),
+                    &split,
+                    threshold,
+                )?
+            };
+            task_completion_models::write_report(&report, Path::new(&output))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "profile" => {
             let workspace = args
                 .next()
@@ -513,6 +696,6 @@ fn inspect_source(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
+        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} task-completion-smollm-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID MODEL_HASH [THRESHOLD] [CONCURRENCY] [LIMIT]\n  {program} task-completion-modernbert-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH NEUTRAL_POLICY [THRESHOLD] [LIMIT]\n  {program} task-completion-binary-score RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json [THRESHOLD]\n  {program} task-completion-binary-calibrate RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
     )
 }
