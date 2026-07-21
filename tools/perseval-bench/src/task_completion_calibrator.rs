@@ -10,8 +10,12 @@ use sha2::{Digest, Sha256};
 use traces_to_evals::canonical_content_id;
 
 use crate::fetch::sha256_file;
+use crate::task_completion_features::{
+    FEATURE_NAMES as STRUCTURED_FEATURE_NAMES,
+    FEATURE_SET_VERSION as STRUCTURED_FEATURE_SET_VERSION, load_feature_records,
+};
 
-const REPORT_SCHEMA_VERSION: &str = "perseval.task_completion_cpu_calibration.v1";
+const REPORT_SCHEMA_VERSION: &str = "perseval.task_completion_cpu_calibration.v2";
 const MODEL_SCHEMA_VERSION: &str = "perseval.task_completion_logistic_model.v1";
 const FEATURE_SET_VERSION: &str = "perseval.learned_task_completion_scores.v1";
 const SMOLLM_SINGLE_FEATURE_SET_VERSION: &str =
@@ -48,6 +52,16 @@ struct ResolutionLabel {
     resolved: bool,
     group_key: String,
     split: String,
+    #[serde(default)]
+    slice: ResolutionSlice,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ResolutionSlice {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    domain_family: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +104,8 @@ struct NliLogits {
 #[derive(Debug, Clone)]
 struct Sample {
     group_key: String,
+    source: String,
+    domain_family: String,
     incomplete: bool,
     features: Vec<f64>,
 }
@@ -109,6 +125,8 @@ pub struct CalibrationReport {
     seeds: Vec<u64>,
     source_sha256: BTreeMap<String, String>,
     nested_out_of_fold: Vec<SeedReport>,
+    leave_one_source_out: Vec<CohortReport>,
+    leave_one_domain_out: Vec<CohortReport>,
     stability: StabilityReport,
     final_model: LogisticArtifact,
 }
@@ -130,6 +148,17 @@ struct FoldReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct CohortReport {
+    held_out: String,
+    training_samples: usize,
+    validation_samples: usize,
+    validation_groups: usize,
+    alpha: f64,
+    threshold: f64,
+    metrics: Metrics,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct StabilityReport {
     required_f1_exclusive: f64,
     required_mcc_exclusive: f64,
@@ -139,6 +168,9 @@ struct StabilityReport {
     median_mcc: f64,
     max_mcc: f64,
     all_seeds_pass: bool,
+    min_leave_source_mcc: Option<f64>,
+    min_leave_domain_mcc: Option<f64>,
+    all_held_out_cohorts_pass: bool,
     advances_to_frozen_holdout: bool,
     decision: String,
 }
@@ -270,6 +302,8 @@ pub fn calibrate_single(
             );
             Ok(Sample {
                 group_key: label.group_key.clone(),
+                source: label.slice.source.clone(),
+                domain_family: label.slice.domain_family.clone(),
                 incomplete: !label.resolved,
                 // Binary judges store completed minus incomplete. Negating it gives
                 // the calibrator an interpretable incomplete/failure score.
@@ -285,6 +319,53 @@ pub fn calibrate_single(
         BTreeMap::from([
             ("labels".into(), hash_file(labels_path)?),
             (feature.source_name.into(), hash_file(results_path)?),
+        ]),
+    )
+}
+
+pub fn calibrate_structured(
+    labels_path: &Path,
+    split: &str,
+    features_path: &Path,
+) -> Result<CalibrationReport> {
+    anyhow::ensure!(
+        split == "baseline",
+        "CPU calibration only accepts the development split `baseline`; the frozen holdout must remain sealed"
+    );
+    let labels = load_labels(labels_path, split)?;
+    let features = load_feature_records(features_path)?;
+    let expected = labels
+        .iter()
+        .map(|label| label.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = features.keys().cloned().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        actual == expected,
+        "structured feature target set differs from selected labels (missing {}, extra {})",
+        expected.difference(&actual).count(),
+        actual.difference(&expected).count()
+    );
+    let samples = labels
+        .iter()
+        .map(|label| {
+            let record = &features[&label.trace_id];
+            Ok(Sample {
+                group_key: label.group_key.clone(),
+                source: label.slice.source.clone(),
+                domain_family: label.slice.domain_family.clone(),
+                incomplete: !label.resolved,
+                features: record.feature_values.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    calibrate_samples(
+        split,
+        samples,
+        STRUCTURED_FEATURE_SET_VERSION,
+        STRUCTURED_FEATURE_NAMES.map(String::from).to_vec(),
+        BTreeMap::from([
+            ("labels".into(), hash_file(labels_path)?),
+            ("structured_features".into(), hash_file(features_path)?),
         ]),
     )
 }
@@ -346,15 +427,31 @@ fn calibrate_samples(
         "cannot calibrate an empty development set"
     );
 
-    let mut reports = Vec::with_capacity(SEEDS.len());
-    for seed in SEEDS {
-        reports.push(run_nested_oof(&samples, seed)?);
-    }
-    let stability = stability_report(&reports);
+    let reports = std::thread::scope(|scope| -> Result<Vec<SeedReport>> {
+        let handles = SEEDS
+            .iter()
+            .map(|seed| scope.spawn(|| run_nested_oof(&samples, *seed)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("nested calibration worker panicked"))?
+            })
+            .collect()
+    })?;
+    let leave_one_source_out = evaluate_held_out_cohorts(&samples, CohortDimension::Source)?;
+    let leave_one_domain_out = evaluate_held_out_cohorts(&samples, CohortDimension::Domain)?;
+    let stability = stability_report(&reports, &leave_one_source_out, &leave_one_domain_out);
 
     let all_indices = (0..samples.len()).collect::<Vec<_>>();
     let final_hyperparameters =
-        select_hyperparameters(&samples, &all_indices, OUTER_FOLDS, SEEDS[0] ^ 0xA11C_E5E5)?;
+        if distinct_cohort_count(&samples, &all_indices, CohortDimension::Source) >= 3 {
+            select_hyperparameters_by_cohort(&samples, &all_indices, CohortDimension::Source)?
+        } else {
+            select_hyperparameters(&samples, &all_indices, OUTER_FOLDS, SEEDS[0] ^ 0xA11C_E5E5)?
+        };
     let standardizer = Standardizer::fit(&samples, &all_indices)?;
     let model = LogisticModel::fit(
         &samples,
@@ -412,6 +509,8 @@ fn calibrate_samples(
         seeds: SEEDS.to_vec(),
         source_sha256,
         nested_out_of_fold: reports,
+        leave_one_source_out,
+        leave_one_domain_out,
         stability,
         final_model,
     })
@@ -564,6 +663,8 @@ fn build_samples(
         );
         samples.push(Sample {
             group_key: label.group_key.clone(),
+            source: label.slice.source.clone(),
+            domain_family: label.slice.domain_family.clone(),
             incomplete: !label.resolved,
             features,
         });
@@ -580,6 +681,173 @@ fn raw_logit(record: &RunRecord, source: &str) -> Result<f64> {
     })?;
     anyhow::ensure!(value.is_finite(), "{source} logit is non-finite");
     Ok(value)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CohortDimension {
+    Source,
+    Domain,
+}
+
+fn evaluate_held_out_cohorts(
+    samples: &[Sample],
+    dimension: CohortDimension,
+) -> Result<Vec<CohortReport>> {
+    let cohorts = samples
+        .iter()
+        .map(|sample| cohort_value(sample, dimension))
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    if cohorts.len() < 2 {
+        return Ok(Vec::new());
+    }
+    std::thread::scope(|scope| -> Result<Vec<CohortReport>> {
+        let handles = cohorts
+            .iter()
+            .map(|cohort| {
+                scope.spawn(|| -> Result<CohortReport> {
+                    let train = samples
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, sample)| {
+                            (cohort_value(sample, dimension) != *cohort).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    let validation = samples
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, sample)| {
+                            (cohort_value(sample, dimension) == *cohort).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    anyhow::ensure!(
+                        !train.is_empty() && !validation.is_empty(),
+                        "empty cohort split"
+                    );
+                    let hyperparameters = if distinct_cohort_count(samples, &train, dimension) >= 3
+                    {
+                        select_hyperparameters_by_cohort(samples, &train, dimension)?
+                    } else {
+                        select_hyperparameters(
+                            samples,
+                            &train,
+                            INNER_FOLDS,
+                            SEEDS[0] ^ stable_hash(0xC0A0_2700, cohort),
+                        )?
+                    };
+                    let standardizer = Standardizer::fit(samples, &train)?;
+                    let model =
+                        LogisticModel::fit(samples, &train, &standardizer, hyperparameters.alpha)?;
+                    let probabilities = validation
+                        .iter()
+                        .map(|index| {
+                            model.predict(&standardizer.transform(&samples[*index].features))
+                        })
+                        .collect::<Vec<_>>();
+                    let labels = validation
+                        .iter()
+                        .map(|index| samples[*index].incomplete)
+                        .collect::<Vec<_>>();
+                    let predictions = probabilities
+                        .iter()
+                        .map(|probability| *probability >= hyperparameters.threshold)
+                        .collect::<Vec<_>>();
+                    Ok(CohortReport {
+                        held_out: (*cohort).into(),
+                        training_samples: train.len(),
+                        validation_samples: validation.len(),
+                        validation_groups: validation
+                            .iter()
+                            .map(|index| samples[*index].group_key.as_str())
+                            .collect::<BTreeSet<_>>()
+                            .len(),
+                        alpha: hyperparameters.alpha,
+                        threshold: hyperparameters.threshold,
+                        metrics: score(&labels, &predictions, &probabilities),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("held-out cohort worker panicked"))?
+            })
+            .collect()
+    })
+}
+
+fn cohort_value(sample: &Sample, dimension: CohortDimension) -> &str {
+    match dimension {
+        CohortDimension::Source => &sample.source,
+        CohortDimension::Domain => &sample.domain_family,
+    }
+}
+
+fn distinct_cohort_count(
+    samples: &[Sample],
+    indices: &[usize],
+    dimension: CohortDimension,
+) -> usize {
+    indices
+        .iter()
+        .map(|index| cohort_value(&samples[*index], dimension))
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn select_hyperparameters_by_cohort(
+    samples: &[Sample],
+    indices: &[usize],
+    dimension: CohortDimension,
+) -> Result<Hyperparameters> {
+    let cohorts = indices
+        .iter()
+        .map(|index| cohort_value(&samples[*index], dimension))
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(cohorts.len() >= 3, "fewer than three calibration cohorts");
+    let mut best: Option<(Metrics, Hyperparameters)> = None;
+    for alpha in ALPHAS {
+        let mut probabilities = Vec::with_capacity(indices.len());
+        let mut labels = Vec::with_capacity(indices.len());
+        for cohort in &cohorts {
+            let train = indices
+                .iter()
+                .copied()
+                .filter(|index| cohort_value(&samples[*index], dimension) != *cohort)
+                .collect::<Vec<_>>();
+            let validation = indices
+                .iter()
+                .copied()
+                .filter(|index| cohort_value(&samples[*index], dimension) == *cohort)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                !train.is_empty() && !validation.is_empty(),
+                "empty cohort fold"
+            );
+            let standardizer = Standardizer::fit(samples, &train)?;
+            let model = LogisticModel::fit(samples, &train, &standardizer, alpha)?;
+            for index in validation {
+                probabilities
+                    .push(model.predict(&standardizer.transform(&samples[index].features)));
+                labels.push(samples[index].incomplete);
+            }
+        }
+        let (threshold, metrics) = best_threshold(&labels, &probabilities);
+        let candidate = Hyperparameters { alpha, threshold };
+        if best
+            .as_ref()
+            .is_none_or(|(current, current_hp)| better(metrics, candidate, *current, *current_hp))
+        {
+            best = Some((metrics, candidate));
+        }
+    }
+    best.map(|(_, hyperparameters)| hyperparameters)
+        .context("no cohort hyperparameters evaluated")
 }
 
 fn run_nested_oof(samples: &[Sample], seed: u64) -> Result<SeedReport> {
@@ -1107,7 +1375,11 @@ fn expected_calibration_error(labels: &[bool], probabilities: &[f64], bins: usiz
     error
 }
 
-fn stability_report(reports: &[SeedReport]) -> StabilityReport {
+fn stability_report(
+    reports: &[SeedReport],
+    source_reports: &[CohortReport],
+    domain_reports: &[CohortReport],
+) -> StabilityReport {
     let mut f1 = reports
         .iter()
         .map(|report| report.metrics.f1)
@@ -1121,6 +1393,19 @@ fn stability_report(reports: &[SeedReport]) -> StabilityReport {
     let all_seeds_pass = reports
         .iter()
         .all(|report| report.metrics.f1 > F1_EXIT && report.metrics.mcc > MCC_EXIT);
+    let min_leave_source_mcc = source_reports
+        .iter()
+        .map(|report| report.metrics.mcc)
+        .min_by(f64::total_cmp);
+    let min_leave_domain_mcc = domain_reports
+        .iter()
+        .map(|report| report.metrics.mcc)
+        .min_by(f64::total_cmp);
+    let all_held_out_cohorts_pass = source_reports
+        .iter()
+        .chain(domain_reports)
+        .all(|report| report.metrics.mcc > MCC_EXIT);
+    let advances_to_frozen_holdout = all_seeds_pass && all_held_out_cohorts_pass;
     StabilityReport {
         required_f1_exclusive: F1_EXIT,
         required_mcc_exclusive: MCC_EXIT,
@@ -1130,8 +1415,11 @@ fn stability_report(reports: &[SeedReport]) -> StabilityReport {
         median_mcc: mcc[mcc.len() / 2],
         max_mcc: *mcc.last().expect("reports are non-empty"),
         all_seeds_pass,
-        advances_to_frozen_holdout: all_seeds_pass,
-        decision: if all_seeds_pass {
+        min_leave_source_mcc,
+        min_leave_domain_mcc,
+        all_held_out_cohorts_pass,
+        advances_to_frozen_holdout,
+        decision: if advances_to_frozen_holdout {
             "advance_to_frozen_holdout".into()
         } else {
             "do_not_open_frozen_holdout".into()
@@ -1195,6 +1483,8 @@ mod tests {
     fn sample(_key: &str, group: &str, incomplete: bool, feature: f64) -> Sample {
         Sample {
             group_key: group.into(),
+            source: "source-a".into(),
+            domain_family: "domain-a".into(),
             incomplete,
             features: vec![feature, feature * 0.5],
         }
@@ -1343,5 +1633,27 @@ mod tests {
                 .to_string()
                 .contains("frozen holdout must remain sealed")
         );
+    }
+
+    #[test]
+    fn held_out_source_evaluation_reports_every_source() {
+        let mut samples = Vec::new();
+        for source in 0..3 {
+            for index in 0..10 {
+                let incomplete = index >= 5;
+                let mut row = sample(
+                    &format!("trace-{source}-{index}"),
+                    &format!("group-{source}-{index}"),
+                    incomplete,
+                    if incomplete { 1.0 } else { -1.0 },
+                );
+                row.source = format!("source-{source}");
+                row.domain_family = format!("domain-{source}");
+                samples.push(row);
+            }
+        }
+        let reports = evaluate_held_out_cohorts(&samples, CohortDimension::Source).unwrap();
+        assert_eq!(reports.len(), 3);
+        assert!(reports.iter().all(|report| report.validation_samples == 10));
     }
 }
