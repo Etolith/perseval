@@ -13,6 +13,7 @@ mod fetch;
 mod fixture;
 mod guard;
 mod isolation;
+mod local_chat;
 mod manifest;
 mod profile;
 mod qualify;
@@ -390,6 +391,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-zero-shot-score" => {
+            let results = args.next().ok_or_else(|| {
+                "task-completion-zero-shot-score requires evaluator results".to_string()
+            })?;
+            let labels = args.next().ok_or_else(|| {
+                "task-completion-zero-shot-score requires a label sidecar".to_string()
+            })?;
+            let output = args.next().ok_or_else(|| {
+                "task-completion-zero-shot-score requires an output report".to_string()
+            })?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion::score_zero_shot(Path::new(&results), Path::new(&labels))?;
+            score::write_json_report(&report, Path::new(&output))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "profile" => {
             let workspace = args
                 .next()
@@ -450,6 +469,6 @@ fn inspect_source(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
+        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
     )
 }

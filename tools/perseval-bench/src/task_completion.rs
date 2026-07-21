@@ -23,6 +23,7 @@ use traces_to_evals::{
 };
 
 use crate::fetch::sha256_file;
+use crate::local_chat::LocalChatClient;
 use crate::score::{load_labels, write_json_report};
 
 const RUN_SCHEMA_VERSION: &str = "perseval.task_completion_benchmark_run.v1";
@@ -138,7 +139,11 @@ pub struct RunReport {
     labels_sha256: String,
     split: String,
     model: String,
+    provider: String,
     profile: String,
+    projector_max_tool_observations: u32,
+    projector_max_summary_bytes: u32,
+    sample_stride: u32,
     selected_count: u64,
     completed_count: u64,
     failed_count: u64,
@@ -160,8 +165,11 @@ pub async fn run(options: RunOptions<'_>) -> Result<RunReport, Box<dyn Error>> {
     let context_projection = benchmark_context_projection(&context)?;
     let projector = TaskCompletionProjectorV1 {
         content_policy: TaskCompletionContentPolicyV1::PreRedactedSummaries,
-        max_tool_observations: 256,
-        max_summary_bytes: 16_384,
+        max_tool_observations: environment_u32(
+            "PERSEVAL_TASK_COMPLETION_MAX_TOOL_OBSERVATIONS",
+            256,
+        )?,
+        max_summary_bytes: environment_u32("PERSEVAL_TASK_COMPLETION_MAX_SUMMARY_BYTES", 16_384)?,
     };
     let labels = load_selection_labels(options.labels)?;
     let mut suite = load_suite(options.suite)?;
@@ -171,6 +179,13 @@ pub async fn run(options: RunOptions<'_>) -> Result<RunReport, Box<dyn Error>> {
         })
     });
     suite.sort_by(|left, right| left.sample_id.cmp(&right.sample_id));
+    let sample_stride = environment_u32("PERSEVAL_TASK_COMPLETION_SAMPLE_STRIDE", 1)?;
+    if sample_stride > 1 {
+        suite = suite
+            .into_iter()
+            .step_by(usize::try_from(sample_stride)?)
+            .collect();
+    }
     if let Some(limit) = options.limit {
         suite.truncate(limit);
     }
@@ -205,11 +220,19 @@ pub async fn run(options: RunOptions<'_>) -> Result<RunReport, Box<dyn Error>> {
         .create(true)
         .append(true)
         .open(&result_path)?;
+    let local_client = std::env::var("PERSEVAL_CHAT_BASE_URL")
+        .ok()
+        .map(|base_url| LocalChatClient::from_base_url(&base_url))
+        .transpose()?;
     for chunk in prepared.chunks(options.concurrency) {
         let mut handles = Vec::with_capacity(chunk.len());
         for case in chunk.iter().cloned() {
+            let local_client = local_client.clone();
             handles.push(tokio::spawn(async move {
-                evaluate_case(OpenAiChatClient::from_env(), case).await
+                match local_client {
+                    Some(client) => evaluate_case(client, case).await,
+                    None => evaluate_case(OpenAiChatClient::from_env(), case).await,
+                }
             }));
         }
         let mut completed = Vec::with_capacity(handles.len());
@@ -226,9 +249,24 @@ pub async fn run(options: RunOptions<'_>) -> Result<RunReport, Box<dyn Error>> {
     }
 
     let results = load_results(&result_path)?;
-    let report = run_report(&options, &result_path, &results)?;
+    let report = run_report(&options, &projector, sample_stride, &result_path, &results)?;
     write_json_report(&report, &options.output.join("manifest.json"))?;
     Ok(report)
+}
+
+fn environment_u32(name: &str, default: u32) -> Result<u32, Box<dyn Error>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| format!("{name} is not valid UTF-8"))?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid {name}: {error}"))?;
+    if value == 0 {
+        return Err(format!("{name} must be greater than zero").into());
+    }
+    Ok(value)
 }
 
 fn validate_run_options(options: &RunOptions<'_>) -> Result<(), Box<dyn Error>> {
@@ -245,7 +283,9 @@ fn validate_run_options(options: &RunOptions<'_>) -> Result<(), Box<dyn Error>> 
     if options.limit == Some(0) {
         return Err("limit must be greater than zero".into());
     }
-    if std::env::var_os("OPENAI_API_KEY").is_none() {
+    if std::env::var_os("PERSEVAL_CHAT_BASE_URL").is_none()
+        && std::env::var_os("OPENAI_API_KEY").is_none()
+    {
         return Err("OPENAI_API_KEY is unavailable to the benchmark process".into());
     }
     Ok(())
@@ -552,6 +592,7 @@ fn evaluator_release(
     profile: &str,
     projection: &TaskCompletionProjectionV1,
 ) -> Result<EvaluatorReleaseSpecV1, Box<dyn Error>> {
+    let provider = benchmark_provider();
     let prompt = profile_prompt(profile)?;
     let code_artifact_hash = canonical_content_id(
         "perseval.task-completion-benchmark-code.v1",
@@ -561,6 +602,19 @@ fn evaluator_release(
             "profile": profile,
             "prompt": prompt,
             "rubric": RUBRIC,
+            "provider": provider,
+            "decoding": if provider == "llama.cpp" {
+                json!({
+                    "temperature": 0.0,
+                    "seed": 42,
+                    "max_tokens": 1_024,
+                    "enable_thinking": false,
+                    "schema_max_string_length": 512,
+                    "schema_max_array_items": 64,
+                })
+            } else {
+                json!({})
+            },
         }),
     )?;
     let release = EvaluatorReleaseSpecV1 {
@@ -569,7 +623,7 @@ fn evaluator_release(
         task_kind: LearnedTaskKind::TaskCompletion,
         target_kind: EvaluationTargetKind::TraceRevision,
         implementation: EvaluationImplementationV1::PromptJudge {
-            provider: "openai".into(),
+            provider: provider.into(),
             requested_model: model.into(),
             system_prompt: prompt.into(),
             rubric: RUBRIC.into(),
@@ -601,6 +655,14 @@ fn evaluator_release(
     };
     release.validate()?;
     Ok(release)
+}
+
+fn benchmark_provider() -> &'static str {
+    if std::env::var_os("PERSEVAL_CHAT_BASE_URL").is_some() {
+        "llama.cpp"
+    } else {
+        "openai"
+    }
 }
 
 fn profile_prompt(profile: &str) -> Result<&'static str, Box<dyn Error>> {
@@ -703,6 +765,8 @@ fn result_file(path: &Path) -> PathBuf {
 
 fn run_report(
     options: &RunOptions<'_>,
+    projector: &TaskCompletionProjectorV1,
+    sample_stride: u32,
     result_path: &Path,
     results: &BTreeMap<String, RunResult>,
 ) -> Result<RunReport, Box<dyn Error>> {
@@ -715,7 +779,11 @@ fn run_report(
         labels_sha256: sha256_file(options.labels)?,
         split: options.split.into(),
         model: options.model.into(),
+        provider: benchmark_provider().into(),
         profile: options.profile.into(),
+        projector_max_tool_observations: projector.max_tool_observations,
+        projector_max_summary_bytes: projector.max_summary_bytes,
+        sample_stride,
         selected_count: results.len() as u64,
         completed_count: 0,
         failed_count: 0,
@@ -772,11 +840,38 @@ pub struct HeadToHeadReport {
     selection: SelectionReport,
     source_judges: SourceJudgeReport,
     calibration: DualJudgeCalibration,
+    zero_shot_primary_metrics: ZeroShotMetrics,
     baseline_fit_metrics: BinaryMetrics,
     primary_holdout_metrics: BinaryMetrics,
     full_diagnostic_metrics: BinaryMetrics,
     runtime: ScoreRuntime,
     exit_criteria: ExitCriteria,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ZeroShotReport {
+    schema_version: String,
+    status: String,
+    split: String,
+    profile: String,
+    failure_threshold: f64,
+    selected_results: u64,
+    scored_results: u64,
+    decisive_judgments: u64,
+    decision_coverage: Option<f64>,
+    abstained_results: u64,
+    provider_failed_results: u64,
+    abstention_score_policy: String,
+    operational_metrics: BinaryMetrics,
+    runtime: ScoreRuntime,
+    exit_criteria: ExitCriteria,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct ZeroShotMetrics {
+    failure_threshold: f64,
+    recall_judge: BinaryMetrics,
+    specificity_judge: BinaryMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -910,7 +1005,7 @@ pub fn score(
         .is_some_and(|value| value > FAILURE_MCC_EXIT);
     Ok(HeadToHeadReport {
         schema_version: SCORE_SCHEMA_VERSION.into(),
-        status: "rust_openai_task_completion_holdout".into(),
+        status: "rust_task_completion_holdout".into(),
         selection: SelectionReport {
             cohort: "linux-honest".into(),
             baseline_split_traces: baseline.len() as u64,
@@ -941,6 +1036,11 @@ pub fn score(
             formula: "failure = w*(1-recall_completion_score) + (1-w)*(1-specificity_completion_score) >= threshold".into(),
             abstention_score_policy: "typed abstention maps to neutral completion score 0.5; provider failures are excluded from overlap".into(),
         },
+        zero_shot_primary_metrics: ZeroShotMetrics {
+            failure_threshold: 0.5,
+            recall_judge: metrics(&primary, 1.0, 0.5),
+            specificity_judge: metrics(&primary, 0.0, 0.5),
+        },
         baseline_fit_metrics,
         primary_holdout_metrics,
         full_diagnostic_metrics,
@@ -951,6 +1051,86 @@ pub fn score(
             primary_f1_pass,
             primary_mcc_pass,
             primary_pass: primary_f1_pass && primary_mcc_pass,
+        },
+    })
+}
+
+pub fn score_zero_shot(
+    results_path: &Path,
+    labels_path: &Path,
+) -> Result<ZeroShotReport, Box<dyn Error>> {
+    let results = load_results(results_path)?;
+    if results.is_empty() {
+        return Err("zero-shot scoring requires at least one result".into());
+    }
+    let labels = load_labels(labels_path)?
+        .into_iter()
+        .map(|label| (label.trace_id.clone(), label))
+        .collect::<BTreeMap<_, _>>();
+    let splits = results
+        .values()
+        .map(|result| result.split.as_str())
+        .collect::<BTreeSet<_>>();
+    if splits.len() != 1 {
+        return Err("zero-shot result file must contain exactly one split".into());
+    }
+    let split = splits.into_iter().next().unwrap_or_default().to_string();
+    let mut rows = Vec::new();
+    for (sample_id, result) in &results {
+        let Some(label) = labels.get(sample_id) else {
+            continue;
+        };
+        let Some(score) = completion_score(result) else {
+            continue;
+        };
+        rows.push(ScoredRow {
+            sample_id: sample_id.clone(),
+            split: split.clone(),
+            actual_failure: !label.resolved,
+            recall_failure_score: 1.0 - score,
+            specificity_failure_score: 1.0 - score,
+        });
+    }
+    if rows.is_empty() {
+        return Err("zero-shot scoring found no valid judgments with labels".into());
+    }
+    let fixed_threshold = 0.5;
+    let metrics = metrics(&rows, 1.0, fixed_threshold);
+    let decisive_judgments = results
+        .values()
+        .filter(|result| matches!(result.state, ResultState::Completed | ResultState::Failed))
+        .count() as u64;
+    let f1_pass = metrics.f1 > FAILURE_F1_EXIT;
+    let mcc_pass = metrics.mcc.is_some_and(|value| value > FAILURE_MCC_EXIT);
+    Ok(ZeroShotReport {
+        schema_version: "perseval.task_completion_zero_shot.v1".into(),
+        status: "rust_task_completion_zero_shot".into(),
+        split,
+        profile: one_profile(results.values())?,
+        failure_threshold: fixed_threshold,
+        selected_results: results.len() as u64,
+        scored_results: rows.len() as u64,
+        decisive_judgments,
+        decision_coverage: ratio(decisive_judgments, results.len() as u64),
+        abstained_results: results
+            .values()
+            .filter(|result| result.state == ResultState::Abstained)
+            .count() as u64,
+        provider_failed_results: results
+            .values()
+            .filter(|result| result.state == ResultState::ProviderFailed)
+            .count() as u64,
+        abstention_score_policy:
+            "typed abstention maps to neutral completion score 0.5; provider failures are excluded"
+                .into(),
+        operational_metrics: metrics,
+        runtime: score_runtime(results.values()),
+        exit_criteria: ExitCriteria {
+            f1_must_exceed: FAILURE_F1_EXIT,
+            mcc_must_exceed: FAILURE_MCC_EXIT,
+            primary_f1_pass: f1_pass,
+            primary_mcc_pass: mcc_pass,
+            primary_pass: f1_pass && mcc_pass,
         },
     })
 }
@@ -1059,7 +1239,7 @@ fn one_profile<'a>(results: impl Iterator<Item = &'a RunResult>) -> Result<Strin
 
 fn score_runtime<'a>(results: impl Iterator<Item = &'a RunResult>) -> ScoreRuntime {
     let mut runtime = ScoreRuntime {
-        provider: "openai".into(),
+        provider: "unknown".into(),
         model: BTreeSet::new(),
         provider_calls: 0,
         reported_input_tokens: 0,
@@ -1076,6 +1256,13 @@ fn score_runtime<'a>(results: impl Iterator<Item = &'a RunResult>) -> ScoreRunti
         else {
             continue;
         };
+        if let Some(provider_name) = &provider.provider {
+            runtime.provider = match runtime.provider.as_str() {
+                "unknown" => provider_name.clone(),
+                current if current == provider_name => current.into(),
+                _ => "mixed".into(),
+            };
+        }
         runtime.provider_calls += 1;
         runtime.summed_provider_latency_ms = runtime
             .summed_provider_latency_ms
@@ -1320,5 +1507,55 @@ mod tests {
         let encoded = serde_json::to_string(&labels.keys().collect::<Vec<_>>()).unwrap();
         assert!(!encoded.contains("HIDDEN"));
         assert_eq!(labels["trace-1"].split.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn zero_shot_report_separates_abstention_scoring_from_decision_coverage() {
+        let directory = tempdir().unwrap();
+        let results_path = directory.path().join("results.jsonl");
+        let labels_path = directory.path().join("labels.jsonl");
+        let case = prepared();
+        let result = RunResult {
+            schema_version: RESULT_SCHEMA_VERSION.into(),
+            sample_id: case.sample_id,
+            group_id: case.group_id,
+            split: case.split,
+            model: case.model,
+            profile: case.profile,
+            evaluator_release_id: case.release.release_id().unwrap(),
+            projection_hash: case.projection.projection_hash.clone(),
+            state: ResultState::Abstained,
+            projection: case.projection,
+            execution: None,
+            error: None,
+        };
+        std::fs::write(
+            &results_path,
+            format!("{}\n", serde_json::to_string(&result).unwrap()),
+        )
+        .unwrap();
+        std::fs::write(
+            &labels_path,
+            concat!(
+                "{\"trace_id\":\"linuxarena:fixture\",",
+                "\"instance_id\":\"fixture\",",
+                "\"trajectory_id\":\"fixture\",",
+                "\"resolved\":false,",
+                "\"model\":\"fixture\",",
+                "\"split\":\"primary\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let report = score_zero_shot(&results_path, &labels_path).unwrap();
+        assert_eq!(report.selected_results, 1);
+        assert_eq!(report.scored_results, 1);
+        assert_eq!(report.decisive_judgments, 0);
+        assert_eq!(report.decision_coverage, Some(0.0));
+        assert_eq!(report.abstained_results, 1);
+        assert_eq!(report.provider_failed_results, 0);
+        assert_eq!(report.operational_metrics.f1, 1.0);
+        assert_eq!(report.operational_metrics.mcc, None);
+        assert!(!report.exit_criteria.primary_pass);
     }
 }
