@@ -14,6 +14,8 @@ use crate::fetch::sha256_file;
 const REPORT_SCHEMA_VERSION: &str = "perseval.task_completion_cpu_calibration.v1";
 const MODEL_SCHEMA_VERSION: &str = "perseval.task_completion_logistic_model.v1";
 const FEATURE_SET_VERSION: &str = "perseval.learned_task_completion_scores.v1";
+const SINGLE_FEATURE_SET_VERSION: &str =
+    "perseval.smollm_mandatory_recovery_task_completion_score.v1";
 const FEATURE_NAMES: [&str; 6] = [
     "smollm_goal_final_logit",
     "smollm_mandatory_logit",
@@ -204,6 +206,89 @@ pub fn calibrate(
         &complete,
         &nli,
     )?;
+    let source_sha256 = BTreeMap::from([
+        ("labels".into(), hash_file(labels_path)?),
+        ("goal_final".into(), hash_file(paths.goal_final)?),
+        ("mandatory".into(), hash_file(paths.mandatory)?),
+        (
+            "mandatory_recovery".into(),
+            hash_file(paths.mandatory_recovery)?,
+        ),
+        ("complete".into(), hash_file(paths.complete)?),
+        ("nli".into(), hash_file(paths.nli)?),
+    ]);
+    calibrate_samples(
+        split,
+        samples,
+        FEATURE_SET_VERSION,
+        feature_names(),
+        source_sha256,
+    )
+}
+
+pub fn calibrate_single(
+    labels_path: &Path,
+    split: &str,
+    results_path: &Path,
+) -> Result<CalibrationReport> {
+    anyhow::ensure!(
+        split == "baseline",
+        "CPU calibration only accepts the development split `baseline`; the frozen holdout must remain sealed"
+    );
+    let labels = load_labels(labels_path, split)?;
+    let results = load_runs(results_path)?;
+    let expected = labels
+        .iter()
+        .map(|label| label.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = results.keys().cloned().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        actual == expected,
+        "mandatory-recovery target set differs from selected labels (missing {}, extra {})",
+        expected.difference(&actual).count(),
+        actual.difference(&expected).count()
+    );
+    let samples = labels
+        .iter()
+        .map(|label| {
+            let result = &results[&label.trace_id];
+            anyhow::ensure!(
+                result.mandatory_facts_omitted == 0,
+                "mandatory-recovery projection omitted mandatory facts for {}",
+                label.trace_id
+            );
+            Ok(Sample {
+                group_key: label.group_key.clone(),
+                incomplete: !label.resolved,
+                // SmolLM's raw value is logit(completed) - logit(incomplete).
+                // Negating it gives the classifier an interpretable failure score.
+                features: vec![-raw_logit(result, "mandatory_recovery")?],
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    calibrate_samples(
+        split,
+        samples,
+        SINGLE_FEATURE_SET_VERSION,
+        vec!["smollm_mandatory_recovery_incomplete_logit".into()],
+        BTreeMap::from([
+            ("labels".into(), hash_file(labels_path)?),
+            ("mandatory_recovery".into(), hash_file(results_path)?),
+        ]),
+    )
+}
+
+fn calibrate_samples(
+    split: &str,
+    samples: Vec<Sample>,
+    feature_set_version: &str,
+    feature_names: Vec<String>,
+    source_sha256: BTreeMap<String, String>,
+) -> Result<CalibrationReport> {
+    anyhow::ensure!(
+        !samples.is_empty(),
+        "cannot calibrate an empty development set"
+    );
 
     let mut reports = Vec::with_capacity(SEEDS.len());
     for seed in SEEDS {
@@ -224,8 +309,8 @@ pub fn calibrate(
     let model_id = canonical_content_id(
         MODEL_SCHEMA_VERSION,
         &serde_json::json!({
-            "feature_set_version": FEATURE_SET_VERSION,
-            "feature_names": FEATURE_NAMES,
+            "feature_set_version": feature_set_version,
+            "feature_names": feature_names,
             "fitted_on_split": split,
             "fitted_samples": samples.len(),
             "alpha": final_hyperparameters.alpha,
@@ -239,8 +324,8 @@ pub fn calibrate(
     let final_model = LogisticArtifact {
         schema_version: MODEL_SCHEMA_VERSION.into(),
         model_id,
-        feature_set_version: FEATURE_SET_VERSION.into(),
-        feature_names: feature_names(),
+        feature_set_version: feature_set_version.into(),
+        feature_names: feature_names.clone(),
         fitted_on_split: split.into(),
         fitted_samples: samples.len(),
         alpha: final_hyperparameters.alpha,
@@ -251,17 +336,6 @@ pub fn calibrate(
         intercept: model.intercept,
     };
 
-    let source_sha256 = BTreeMap::from([
-        ("labels".into(), hash_file(labels_path)?),
-        ("goal_final".into(), hash_file(paths.goal_final)?),
-        ("mandatory".into(), hash_file(paths.mandatory)?),
-        (
-            "mandatory_recovery".into(),
-            hash_file(paths.mandatory_recovery)?,
-        ),
-        ("complete".into(), hash_file(paths.complete)?),
-        ("nli".into(), hash_file(paths.nli)?),
-    ]);
     let groups = samples
         .iter()
         .map(|sample| sample.group_key.as_str())
@@ -270,14 +344,14 @@ pub fn calibrate(
     let incomplete_count = samples.iter().filter(|sample| sample.incomplete).count();
     Ok(CalibrationReport {
         schema_version: REPORT_SCHEMA_VERSION.into(),
-        feature_set_version: FEATURE_SET_VERSION.into(),
+        feature_set_version: feature_set_version.into(),
         training_split: split.into(),
         holdout_evaluated: false,
         sample_count: samples.len(),
         group_count: groups,
         incomplete_count,
         completed_count: samples.len() - incomplete_count,
-        feature_names: feature_names(),
+        feature_names,
         alpha_candidates: ALPHAS.to_vec(),
         seeds: SEEDS.to_vec(),
         source_sha256,
@@ -582,44 +656,77 @@ fn grouped_stratified_folds(
     seed: u64,
 ) -> Result<Vec<usize>> {
     anyhow::ensure!(folds >= 2, "at least two folds are required");
-    let mut groups = BTreeMap::<&str, (bool, Vec<usize>)>::new();
+    let mut groups = BTreeMap::<&str, Vec<usize>>::new();
     for index in indices {
         let sample = &samples[*index];
-        let entry = groups
-            .entry(&sample.group_key)
-            .or_insert_with(|| (sample.incomplete, Vec::new()));
-        anyhow::ensure!(
-            entry.0 == sample.incomplete,
-            "group {:?} contains conflicting labels",
-            sample.group_key
-        );
-        entry.1.push(*index);
+        groups.entry(&sample.group_key).or_default().push(*index);
     }
+    anyhow::ensure!(groups.len() >= folds, "fewer groups than folds");
+    let total_positive = indices
+        .iter()
+        .filter(|index| samples[**index].incomplete)
+        .count() as f64;
+    let total_negative = indices.len() as f64 - total_positive;
+    let target_positive = total_positive / folds as f64;
+    let target_negative = total_negative / folds as f64;
+    let target_size = indices.len() as f64 / folds as f64;
+    let mut ordered_groups = groups.into_iter().collect::<Vec<_>>();
+    ordered_groups.sort_by(|(left_key, left), (right_key, right)| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| stable_hash(seed, left_key).cmp(&stable_hash(seed, right_key)))
+    });
+
     let mut assignments = vec![usize::MAX; samples.len()];
-    for class in [false, true] {
-        let mut class_groups = groups
+    let mut fold_positive = vec![0usize; folds];
+    let mut fold_negative = vec![0usize; folds];
+    for (group_index, (_, members)) in ordered_groups.into_iter().enumerate() {
+        let positive = members
             .iter()
-            .filter(|(_, (label, _))| *label == class)
-            .map(|(key, (_, members))| (*key, members))
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            class_groups.len() >= folds,
-            "class {class} has fewer groups than folds"
-        );
-        class_groups.sort_by_key(|(key, _)| stable_hash(seed, key));
-        let mut fold_sizes = vec![0usize; folds];
-        for (_, members) in class_groups {
-            let fold = fold_sizes
-                .iter()
-                .enumerate()
-                .min_by_key(|(fold, size)| (**size, *fold))
-                .map(|(fold, _)| fold)
-                .expect("fold list is non-empty");
-            for index in members {
-                assignments[*index] = fold;
-            }
-            fold_sizes[fold] += members.len();
+            .filter(|index| samples[**index].incomplete)
+            .count();
+        let negative = members.len() - positive;
+        let fold = if group_index < folds {
+            group_index
+        } else {
+            (0..folds)
+                .min_by(|left, right| {
+                    let score = |candidate: usize| {
+                        (0..folds)
+                            .map(|fold| {
+                                let next_positive = fold_positive[fold]
+                                    + if fold == candidate { positive } else { 0 };
+                                let next_negative = fold_negative[fold]
+                                    + if fold == candidate { negative } else { 0 };
+                                let next_size = next_positive + next_negative;
+                                ((next_positive as f64 - target_positive)
+                                    / target_positive.max(1.0))
+                                .powi(2)
+                                    + ((next_negative as f64 - target_negative)
+                                        / target_negative.max(1.0))
+                                    .powi(2)
+                                    + 0.25
+                                        * ((next_size as f64 - target_size) / target_size.max(1.0))
+                                            .powi(2)
+                            })
+                            .sum::<f64>()
+                    };
+                    score(*left)
+                        .total_cmp(&score(*right))
+                        .then_with(|| {
+                            (fold_positive[*left] + fold_negative[*left])
+                                .cmp(&(fold_positive[*right] + fold_negative[*right]))
+                        })
+                        .then_with(|| left.cmp(right))
+                })
+                .expect("fold list is non-empty")
+        };
+        for index in members {
+            assignments[index] = fold;
         }
+        fold_positive[fold] += positive;
+        fold_negative[fold] += negative;
     }
     anyhow::ensure!(
         indices
@@ -1079,15 +1186,37 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_group_labels_are_rejected() {
-        let samples = vec![
-            sample("a", "same", false, -1.0),
-            sample("b", "same", true, 1.0),
-            sample("c", "c", false, -1.0),
-            sample("d", "d", true, 1.0),
-        ];
-        let error = grouped_stratified_folds(&samples, &[0, 1, 2, 3], 2, 17).unwrap_err();
-        assert!(error.to_string().contains("conflicting labels"));
+    fn mixed_outcome_groups_stay_in_one_fold() {
+        let mut samples = balanced_samples();
+        samples[10].group_key = samples[0].group_key.clone();
+        let indices = (0..samples.len()).collect::<Vec<_>>();
+        let folds = grouped_stratified_folds(&samples, &indices, 5, 17).unwrap();
+        assert_eq!(folds[0], folds[10]);
+    }
+
+    #[test]
+    fn variable_sized_groups_do_not_starve_folds() {
+        let mut samples = Vec::new();
+        for group in 0..308 {
+            let members = if group < 5 { 7 } else { 1 };
+            for member in 0..members {
+                let incomplete = (group + member) % 3 == 0;
+                samples.push(sample(
+                    &format!("trace-{group}-{member}"),
+                    &format!("group-{group}"),
+                    incomplete,
+                    if incomplete { 1.0 } else { -1.0 },
+                ));
+            }
+        }
+        let indices = (0..samples.len()).collect::<Vec<_>>();
+        let assignments = grouped_stratified_folds(&samples, &indices, 5, 17).unwrap();
+        let mut sizes = [0_usize; 5];
+        for fold in assignments {
+            sizes[fold] += 1;
+        }
+        let spread = sizes.iter().max().unwrap() - sizes.iter().min().unwrap();
+        assert!(spread <= 7, "fold sizes are unbalanced: {sizes:?}");
     }
 
     #[test]

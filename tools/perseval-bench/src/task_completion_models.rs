@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -568,20 +568,65 @@ pub async fn run_smollm(
         projections.truncate(limit);
     }
     anyhow::ensure!(!projections.is_empty(), "no projections selected");
-    let mut writer = BufWriter::new(File::create(output)?);
+    let selected_projections = projections.len() as u64;
+    let existing = if output.is_file() {
+        load_model_results(output)?
+    } else {
+        BTreeMap::new()
+    };
+    {
+        let selected = projections
+            .iter()
+            .map(|projection| (projection.target_key.as_str(), projection))
+            .collect::<BTreeMap<_, _>>();
+        for result in existing.values() {
+            let projection = selected.get(result.target_key.as_str()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "existing result {} is not in the selected projections",
+                    result.target_key
+                )
+            })?;
+            result.decision.validate_against(projection)?;
+            anyhow::ensure!(
+                result.mandatory_facts_omitted == projection.stats.mandatory_facts_omitted,
+                "existing result {} has stale mandatory-evidence accounting",
+                result.target_key
+            );
+            anyhow::ensure!(
+                result.decision.inference.model_id == model_id
+                    && result.decision.inference.model_hash.as_deref() == Some(model_hash)
+                    && result.decision.inference.prompt_version.as_deref() == Some(PROMPT_VERSION)
+                    && (result.decision.threshold - threshold).abs() < f64::EPSILON,
+                "existing result {} was produced by a different evaluator configuration",
+                result.target_key
+            );
+        }
+    }
+    projections.retain(|projection| !existing.contains_key(&projection.target_key));
+    let mut writer = BufWriter::new(OpenOptions::new().create(true).append(true).open(output)?);
     let mut report = ModelRunReport {
         schema_version: RUN_SCHEMA_VERSION.into(),
         model_id: model_id.into(),
         model_hash: model_hash.into(),
         prompt_version: PROMPT_VERSION.into(),
         threshold,
-        selected_projections: projections.len() as u64,
+        selected_projections,
         completed: 0,
         incomplete: 0,
         abstained: 0,
         summed_latency_ms: 0,
         output: output.display().to_string(),
     };
+    for result in existing.values() {
+        match result.decision.outcome {
+            BinaryTaskCompletionOutcomeV1::Completed => report.completed += 1,
+            BinaryTaskCompletionOutcomeV1::Incomplete => report.incomplete += 1,
+            BinaryTaskCompletionOutcomeV1::Abstain => report.abstained += 1,
+        }
+        report.summed_latency_ms = report
+            .summed_latency_ms
+            .saturating_add(result.decision.inference.latency_ms);
+    }
     for chunk in projections.chunks(concurrency) {
         let mut handles = Vec::with_capacity(chunk.len());
         for projection in chunk.iter().cloned() {
