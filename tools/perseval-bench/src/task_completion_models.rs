@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -12,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use traces_to_evals::{
     BINARY_TASK_COMPLETION_DECISION_SCHEMA_VERSION, BinaryTaskCompletionDecisionV1,
-    BinaryTaskCompletionOutcomeV1, CompactTaskCompletionProjectionV1, LearnedAbstentionReasonV1,
-    TaskCompletionInferenceProvenanceV1, canonical_content_id,
+    BinaryTaskCompletionOutcomeV1, ChatClient, ChatRequest, CompactTaskCompletionProjectionV1,
+    LearnedAbstentionReasonV1, OpenAiChatClient, ProviderExecutionFailureV1,
+    ProviderResponseEnvelopeV1, ResponseSchema, TaskCompletionInferenceProvenanceV1,
+    canonical_content_id,
 };
 
 use tokenizers::{EncodeInput, Tokenizer, TruncationParams, TruncationStrategy};
@@ -23,6 +26,7 @@ use crate::task_completion_compact::{render_projection_evidence, render_projecti
 const RUN_SCHEMA_VERSION: &str = "perseval.task_completion_binary_run.v1";
 const SCORE_SCHEMA_VERSION: &str = "perseval.task_completion_binary_score.v1";
 const PROMPT_VERSION: &str = "perseval.binary-task-completion-ab-v1";
+const CLOUD_PROMPT_VERSION: &str = "perseval.compact-task-completion-cloud-v1";
 const NLI_PROMPT_VERSION: &str = "perseval.binary-task-completion-nli-v1";
 const NLI_HYPOTHESIS: &str = "The agent completed every active requirement in the user's request, including required verification and external side effects.";
 const NLI_MAX_TOKENS: usize = 2_048;
@@ -30,6 +34,7 @@ const COMPLETE_VERBALIZER: &str = " A";
 const INCOMPLETE_VERBALIZER: &str = " B";
 const F1_EXIT: f64 = 0.206;
 const MCC_EXIT: f64 = 0.200;
+const CLOUD_SYSTEM_PROMPT: &str = "Judge whether the active user request was completed from the supplied compact trace evidence. Completed requires evidence that every active requirement and required side effect was fulfilled. A final assistant claim is not proof. Consider an error together with any later recovery and verification. Choose incomplete when required work is missing, failed, abandoned, contradicted, or unsupported. Choose abstain only when the supplied projection genuinely lacks the evidence needed to decide. Cite at most three supplied evidence identifiers. Return probability_complete as your best probability that the task was completed; it must agree with the chosen label at threshold 0.5.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelRunRecord {
@@ -42,6 +47,8 @@ struct ModelRunRecord {
     error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nli_diagnostics: Option<NliDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_response: Option<ProviderResponseEnvelopeV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -67,6 +74,30 @@ struct SmolCompletionClient {
     model_hash: String,
     evaluator_release_id: String,
     threshold: f64,
+}
+
+#[derive(Clone)]
+struct OpenAiCompletionClient {
+    client: Arc<OpenAiChatClient>,
+    model_id: String,
+    evaluator_release_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CloudTaskCompletionLabel {
+    Completed,
+    Incomplete,
+    Abstain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CloudTaskCompletionJudgment {
+    label: CloudTaskCompletionLabel,
+    probability_complete: f64,
+    evidence_ids: Vec<String>,
+    reason_code: String,
+    explanation: String,
 }
 
 struct ModernBertNliClient {
@@ -227,6 +258,7 @@ impl SmolCompletionClient {
             decision,
             error,
             nli_diagnostics: None,
+            provider_response: None,
         })
     }
 
@@ -267,6 +299,331 @@ impl SmolCompletionClient {
             .map_err(|error| InferenceError::Invalid(error.to_string()))?;
         response.binary_logits()
     }
+}
+
+impl OpenAiCompletionClient {
+    fn from_environment(model_id: &str) -> Result<Self> {
+        anyhow::ensure!(
+            std::env::var_os("OPENAI_API_KEY").is_some(),
+            "OPENAI_API_KEY is required for cloud task-completion inference"
+        );
+        anyhow::ensure!(!model_id.trim().is_empty(), "model id must not be empty");
+        let evaluator_release_id = canonical_content_id(
+            "perseval.compact-task-completion-cloud-evaluator.v1",
+            &json!({
+                "model_id": model_id,
+                "prompt_version": CLOUD_PROMPT_VERSION,
+                "system_prompt": CLOUD_SYSTEM_PROMPT,
+                "response_schema": cloud_response_schema().schema,
+                "threshold": 0.5,
+            }),
+        )?;
+        Ok(Self {
+            client: Arc::new(OpenAiChatClient::from_env()),
+            model_id: model_id.into(),
+            evaluator_release_id,
+        })
+    }
+
+    async fn evaluate(
+        &self,
+        projection: CompactTaskCompletionProjectionV1,
+    ) -> Result<ModelRunRecord> {
+        projection.validate()?;
+        let request = ChatRequest {
+            model: self.model_id.clone(),
+            system_prompt: CLOUD_SYSTEM_PROMPT.into(),
+            user_prompt: render_projection_evidence(&projection),
+            response_schema: cloud_response_schema(),
+            context_id: Some(projection.projection_hash.clone()),
+        };
+        let started = Instant::now();
+        let mut response = None;
+        for attempt in 0..3_u64 {
+            match self
+                .client
+                .complete_json_enveloped::<CloudTaskCompletionJudgment>(request.clone())
+                .await
+            {
+                Ok(envelope) => {
+                    response = Some(Ok(envelope));
+                    break;
+                }
+                Err(error) if attempt < 2 => {
+                    response = Some(Err(error));
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+                }
+                Err(error) => response = Some(Err(error)),
+            }
+        }
+        let response = response.expect("cloud inference loop must execute");
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let (judgment, provider_response, provider_error) = match response {
+            Ok(envelope) => (
+                Some(envelope.output),
+                Some(envelope.provider_response),
+                None,
+            ),
+            Err(error) => {
+                let failure = error.downcast_ref::<ProviderExecutionFailureV1>();
+                (
+                    None,
+                    failure.and_then(|failure| failure.provider_response.clone()),
+                    Some(sanitize_cloud_error(&error.to_string())),
+                )
+            }
+        };
+        let usage = provider_response
+            .as_ref()
+            .and_then(|response| response.usage.as_ref());
+        let input_tokens = usage
+            .and_then(|usage| usage.input_tokens)
+            .unwrap_or(projection.token_budget.projected_tokens.max(1));
+        let output_tokens = usage.and_then(|usage| usage.output_tokens).unwrap_or(0);
+        let inference = TaskCompletionInferenceProvenanceV1 {
+            runtime: "openai-chat-completions".into(),
+            model_id: self.model_id.clone(),
+            model_hash: None,
+            prompt_version: Some(CLOUD_PROMPT_VERSION.into()),
+            tokenizer_id: "openai-provider-reported".into(),
+            input_tokens,
+            output_tokens,
+            latency_ms: elapsed_ms,
+            cost_microusd: None,
+        };
+        let (decision, judgment_error) = match judgment {
+            Some(judgment) => {
+                match self.decision_from_judgment(&projection, judgment, inference.clone()) {
+                    Ok(decision) => (decision, None),
+                    Err(error) => (
+                        self.abstention_decision(
+                            &projection,
+                            inference,
+                            LearnedAbstentionReasonV1::InvalidProviderOutput,
+                            "invalid_provider_output",
+                            "The provider judgment failed the compact task-completion contract.",
+                        ),
+                        Some(sanitize_cloud_error(&error.to_string())),
+                    ),
+                }
+            }
+            None => (
+                self.abstention_decision(
+                    &projection,
+                    inference,
+                    LearnedAbstentionReasonV1::ProviderUnavailable,
+                    "provider_unavailable",
+                    "Cloud judgment was unavailable; no completion decision was recorded.",
+                ),
+                None,
+            ),
+        };
+        decision.validate_against(&projection)?;
+        Ok(ModelRunRecord {
+            schema_version: RUN_SCHEMA_VERSION.into(),
+            target_key: projection.target_key,
+            mandatory_facts_omitted: projection.stats.mandatory_facts_omitted,
+            decision,
+            error: provider_error.or(judgment_error),
+            nli_diagnostics: None,
+            provider_response,
+        })
+    }
+
+    fn decision_from_judgment(
+        &self,
+        projection: &CompactTaskCompletionProjectionV1,
+        judgment: CloudTaskCompletionJudgment,
+        inference: TaskCompletionInferenceProvenanceV1,
+    ) -> Result<BinaryTaskCompletionDecisionV1> {
+        validate_probability(judgment.probability_complete, "probability_complete")?;
+        anyhow::ensure!(
+            !judgment.reason_code.trim().is_empty(),
+            "cloud judgment reason_code must not be empty"
+        );
+        anyhow::ensure!(
+            !judgment.explanation.trim().is_empty(),
+            "cloud judgment explanation must not be empty"
+        );
+        anyhow::ensure!(
+            judgment.evidence_ids.len() <= 3,
+            "cloud judgment cited more than three evidence identifiers"
+        );
+        let known_ids = projection
+            .facts
+            .iter()
+            .map(|fact| fact.evidence_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let unique_ids = judgment
+            .evidence_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            unique_ids.len() == judgment.evidence_ids.len(),
+            "cloud judgment repeated an evidence identifier"
+        );
+        anyhow::ensure!(
+            unique_ids.iter().all(|id| known_ids.contains(id)),
+            "cloud judgment cited an unknown evidence identifier"
+        );
+        let (outcome, raw_logit_difference, probability_complete, abstention_reason) =
+            match judgment.label {
+                CloudTaskCompletionLabel::Completed => {
+                    anyhow::ensure!(
+                        judgment.probability_complete >= 0.5,
+                        "completed cloud label conflicts with probability_complete"
+                    );
+                    anyhow::ensure!(
+                        !judgment.evidence_ids.is_empty(),
+                        "decisive cloud judgment requires cited evidence"
+                    );
+                    (
+                        BinaryTaskCompletionOutcomeV1::Completed,
+                        Some(logit(judgment.probability_complete)),
+                        Some(judgment.probability_complete),
+                        None,
+                    )
+                }
+                CloudTaskCompletionLabel::Incomplete => {
+                    anyhow::ensure!(
+                        judgment.probability_complete < 0.5,
+                        "incomplete cloud label conflicts with probability_complete"
+                    );
+                    anyhow::ensure!(
+                        !judgment.evidence_ids.is_empty(),
+                        "decisive cloud judgment requires cited evidence"
+                    );
+                    (
+                        BinaryTaskCompletionOutcomeV1::Incomplete,
+                        Some(logit(judgment.probability_complete)),
+                        Some(judgment.probability_complete),
+                        None,
+                    )
+                }
+                CloudTaskCompletionLabel::Abstain => (
+                    BinaryTaskCompletionOutcomeV1::Abstain,
+                    None,
+                    None,
+                    Some(LearnedAbstentionReasonV1::EvidenceInsufficient),
+                ),
+            };
+        Ok(BinaryTaskCompletionDecisionV1 {
+            schema_version: BINARY_TASK_COMPLETION_DECISION_SCHEMA_VERSION.into(),
+            evaluator_release_id: self.evaluator_release_id.clone(),
+            target_key: projection.target_key.clone(),
+            target_revision: projection.target_revision.clone(),
+            trace_context_binding_id: projection.trace_context_binding_id.clone(),
+            projection_hash: projection.projection_hash.clone(),
+            outcome,
+            raw_logit_difference,
+            probability_complete,
+            threshold: 0.5,
+            calibration_model_id: None,
+            evidence_ids: judgment.evidence_ids,
+            reason_code: Some(judgment.reason_code),
+            explanation: Some(judgment.explanation),
+            abstention_reason,
+            inference,
+        })
+    }
+
+    fn abstention_decision(
+        &self,
+        projection: &CompactTaskCompletionProjectionV1,
+        inference: TaskCompletionInferenceProvenanceV1,
+        abstention_reason: LearnedAbstentionReasonV1,
+        reason_code: &str,
+        explanation: &str,
+    ) -> BinaryTaskCompletionDecisionV1 {
+        BinaryTaskCompletionDecisionV1 {
+            schema_version: BINARY_TASK_COMPLETION_DECISION_SCHEMA_VERSION.into(),
+            evaluator_release_id: self.evaluator_release_id.clone(),
+            target_key: projection.target_key.clone(),
+            target_revision: projection.target_revision.clone(),
+            trace_context_binding_id: projection.trace_context_binding_id.clone(),
+            projection_hash: projection.projection_hash.clone(),
+            outcome: BinaryTaskCompletionOutcomeV1::Abstain,
+            raw_logit_difference: None,
+            probability_complete: None,
+            threshold: 0.5,
+            calibration_model_id: None,
+            evidence_ids: Vec::new(),
+            reason_code: Some(reason_code.into()),
+            explanation: Some(explanation.into()),
+            abstention_reason: Some(abstention_reason),
+            inference,
+        }
+    }
+}
+
+fn cloud_response_schema() -> ResponseSchema {
+    ResponseSchema {
+        name: "compact_task_completion_judgment".into(),
+        description: Some("Evidence-grounded binary task-completion judgment".into()),
+        strict: true,
+        schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "label",
+                "probability_complete",
+                "evidence_ids",
+                "reason_code",
+                "explanation"
+            ],
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "enum": ["completed", "incomplete", "abstain"]
+                },
+                "probability_complete": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0
+                },
+                "evidence_ids": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {"type": "string", "pattern": "^E[0-9]{4}$"}
+                },
+                "reason_code": {
+                    "type": "string",
+                    "enum": [
+                        "task_completed",
+                        "required_work_missing",
+                        "verification_failed",
+                        "completion_unsupported",
+                        "unresolved_error",
+                        "external_side_effect_missing",
+                        "evidence_insufficient"
+                    ]
+                },
+                "explanation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                }
+            }
+        }),
+    }
+}
+
+fn sanitize_cloud_error(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|word| {
+            if word.starts_with("sk-") || word.contains("OPENAI_API_KEY=") {
+                "[REDACTED]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
 }
 
 impl ModernBertNliClient {
@@ -459,6 +816,7 @@ impl ModernBertNliClient {
                 neutral_argmax: neutral_is_argmax,
                 input_truncated,
             }),
+            provider_response: None,
         })
     }
 }
@@ -665,6 +1023,113 @@ pub async fn run_smollm(
         writer.flush()?;
     }
     Ok(report)
+}
+
+pub async fn run_openai(
+    projections: &Path,
+    output: &Path,
+    model_id: &str,
+    concurrency: usize,
+    limit: Option<usize>,
+) -> Result<ModelRunReport> {
+    anyhow::ensure!(projections.is_file(), "projection file does not exist");
+    anyhow::ensure!(
+        (1..=8).contains(&concurrency),
+        "concurrency must be between 1 and 8"
+    );
+    let client = OpenAiCompletionClient::from_environment(model_id)?;
+    let mut projections = load_projections(projections)?;
+    projections.sort_by(|left, right| left.target_key.cmp(&right.target_key));
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit > 0, "limit must be greater than zero");
+        projections.truncate(limit);
+    }
+    anyhow::ensure!(!projections.is_empty(), "no projections selected");
+    let selected_projections = projections.len() as u64;
+    let existing = if output.is_file() {
+        load_model_results(output)?
+    } else {
+        BTreeMap::new()
+    };
+    {
+        let selected = projections
+            .iter()
+            .map(|projection| (projection.target_key.as_str(), projection))
+            .collect::<BTreeMap<_, _>>();
+        for result in existing.values() {
+            let projection = selected.get(result.target_key.as_str()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "existing result {} is not in the selected projections",
+                    result.target_key
+                )
+            })?;
+            result.decision.validate_against(projection)?;
+            anyhow::ensure!(
+                result.mandatory_facts_omitted == projection.stats.mandatory_facts_omitted,
+                "existing result {} has stale mandatory-evidence accounting",
+                result.target_key
+            );
+            anyhow::ensure!(
+                result.decision.inference.model_id == model_id
+                    && result.decision.inference.model_hash.is_none()
+                    && result.decision.inference.prompt_version.as_deref()
+                        == Some(CLOUD_PROMPT_VERSION)
+                    && (result.decision.threshold - 0.5).abs() < f64::EPSILON,
+                "existing result {} was produced by a different evaluator configuration",
+                result.target_key
+            );
+        }
+    }
+    projections.retain(|projection| !existing.contains_key(&projection.target_key));
+    let mut writer = BufWriter::new(OpenOptions::new().create(true).append(true).open(output)?);
+    let mut report = ModelRunReport {
+        schema_version: RUN_SCHEMA_VERSION.into(),
+        model_id: model_id.into(),
+        model_hash: "provider-managed".into(),
+        prompt_version: CLOUD_PROMPT_VERSION.into(),
+        threshold: 0.5,
+        selected_projections,
+        completed: 0,
+        incomplete: 0,
+        abstained: 0,
+        summed_latency_ms: 0,
+        output: output.display().to_string(),
+    };
+    for result in existing.values() {
+        update_report(&mut report, result);
+    }
+    for chunk in projections.chunks(concurrency) {
+        let mut handles = Vec::with_capacity(chunk.len());
+        for projection in chunk.iter().cloned() {
+            let client = client.clone();
+            handles.push(tokio::spawn(
+                async move { client.evaluate(projection).await },
+            ));
+        }
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await??);
+        }
+        results.sort_by(|left, right| left.target_key.cmp(&right.target_key));
+        for result in results {
+            update_report(&mut report, &result);
+            serde_json::to_writer(&mut writer, &result)?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
+    }
+    Ok(report)
+}
+
+fn update_report(report: &mut ModelRunReport, result: &ModelRunRecord) {
+    match result.decision.outcome {
+        BinaryTaskCompletionOutcomeV1::Completed => report.completed += 1,
+        BinaryTaskCompletionOutcomeV1::Incomplete => report.incomplete += 1,
+        BinaryTaskCompletionOutcomeV1::Abstain => report.abstained += 1,
+    }
+    report.summed_latency_ms = report
+        .summed_latency_ms
+        .saturating_add(result.decision.inference.latency_ms);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1149,6 +1614,11 @@ fn sigmoid(value: f64) -> f64 {
     }
 }
 
+fn logit(probability: f64) -> f64 {
+    let probability = probability.clamp(1e-12, 1.0 - 1e-12);
+    (probability / (1.0 - probability)).ln()
+}
+
 fn softmax_three(logits: &NliLogits) -> NliLogits {
     let maximum = logits
         .entailment
@@ -1241,5 +1711,26 @@ mod tests {
         assert_eq!(auroc, Some(1.0));
         assert!((brier - 0.025).abs() < 1e-12);
         assert!((calibration_error - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cloud_schema_is_strict_and_label_complete() {
+        let schema = cloud_response_schema();
+        assert!(schema.strict);
+        assert_eq!(schema.schema["additionalProperties"], false);
+        assert_eq!(
+            schema.schema["properties"]["label"]["enum"],
+            json!(["completed", "incomplete", "abstain"])
+        );
+        assert_eq!(schema.schema["properties"]["evidence_ids"]["maxItems"], 3);
+    }
+
+    #[test]
+    fn cloud_error_sanitization_and_logit_are_safe() {
+        let sanitized = sanitize_cloud_error("request failed with sk-do-not-leak token");
+        assert_eq!(sanitized, "request failed with [REDACTED] token");
+        assert!(logit(1.0).is_finite());
+        assert!(logit(0.0).is_finite());
+        assert!((sigmoid(logit(0.73)) - 0.73).abs() < 1e-12);
     }
 }

@@ -14,8 +14,11 @@ use crate::fetch::sha256_file;
 const REPORT_SCHEMA_VERSION: &str = "perseval.task_completion_cpu_calibration.v1";
 const MODEL_SCHEMA_VERSION: &str = "perseval.task_completion_logistic_model.v1";
 const FEATURE_SET_VERSION: &str = "perseval.learned_task_completion_scores.v1";
-const SINGLE_FEATURE_SET_VERSION: &str =
+const SMOLLM_SINGLE_FEATURE_SET_VERSION: &str =
     "perseval.smollm_mandatory_recovery_task_completion_score.v1";
+const CLOUD_SINGLE_FEATURE_SET_VERSION: &str = "perseval.cloud_compact_task_completion_score.v1";
+const CLOUD_PROMPT_VERSION: &str = "perseval.compact-task-completion-cloud-v1";
+const SMOLLM_PROMPT_VERSION: &str = "perseval.binary-task-completion-ab-v1";
 const FEATURE_NAMES: [&str; 6] = [
     "smollm_goal_final_logit",
     "smollm_mandatory_logit",
@@ -63,6 +66,13 @@ struct DecisionRecord {
     target_revision: String,
     trace_context_binding_id: String,
     raw_logit_difference: Option<f64>,
+    inference: InferenceRecord,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InferenceRecord {
+    model_id: String,
+    prompt_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,38 +254,84 @@ pub fn calibrate_single(
     let actual = results.keys().cloned().collect::<BTreeSet<_>>();
     anyhow::ensure!(
         actual == expected,
-        "mandatory-recovery target set differs from selected labels (missing {}, extra {})",
+        "single-feature target set differs from selected labels (missing {}, extra {})",
         expected.difference(&actual).count(),
         actual.difference(&expected).count()
     );
+    let feature = single_feature_identity(results.values())?;
     let samples = labels
         .iter()
         .map(|label| {
             let result = &results[&label.trace_id];
             anyhow::ensure!(
                 result.mandatory_facts_omitted == 0,
-                "mandatory-recovery projection omitted mandatory facts for {}",
+                "single-feature projection omitted mandatory facts for {}",
                 label.trace_id
             );
             Ok(Sample {
                 group_key: label.group_key.clone(),
                 incomplete: !label.resolved,
-                // SmolLM's raw value is logit(completed) - logit(incomplete).
-                // Negating it gives the classifier an interpretable failure score.
-                features: vec![-raw_logit(result, "mandatory_recovery")?],
+                // Binary judges store completed minus incomplete. Negating it gives
+                // the calibrator an interpretable incomplete/failure score.
+                features: vec![-raw_logit(result, feature.source_name)?],
             })
         })
         .collect::<Result<Vec<_>>>()?;
     calibrate_samples(
         split,
         samples,
-        SINGLE_FEATURE_SET_VERSION,
-        vec!["smollm_mandatory_recovery_incomplete_logit".into()],
+        feature.feature_set_version,
+        vec![feature.feature_name.into()],
         BTreeMap::from([
             ("labels".into(), hash_file(labels_path)?),
-            ("mandatory_recovery".into(), hash_file(results_path)?),
+            (feature.source_name.into(), hash_file(results_path)?),
         ]),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SingleFeatureIdentity {
+    feature_set_version: &'static str,
+    feature_name: &'static str,
+    source_name: &'static str,
+}
+
+fn single_feature_identity<'a>(
+    results: impl Iterator<Item = &'a RunRecord>,
+) -> Result<SingleFeatureIdentity> {
+    let identities = results
+        .map(|result| {
+            (
+                result.decision.inference.model_id.as_str(),
+                result.decision.inference.prompt_version.as_deref(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        identities.len() == 1,
+        "single-feature calibration requires one model and prompt version, found {}",
+        identities.len()
+    );
+    let (model_id, prompt_version) = identities
+        .into_iter()
+        .next()
+        .context("single-feature calibration requires at least one result")?;
+    match prompt_version {
+        Some(CLOUD_PROMPT_VERSION) => Ok(SingleFeatureIdentity {
+            feature_set_version: CLOUD_SINGLE_FEATURE_SET_VERSION,
+            feature_name: "cloud_compact_incomplete_logit",
+            source_name: "compact_cloud_score",
+        }),
+        Some(SMOLLM_PROMPT_VERSION) => Ok(SingleFeatureIdentity {
+            feature_set_version: SMOLLM_SINGLE_FEATURE_SET_VERSION,
+            feature_name: "smollm_mandatory_recovery_incomplete_logit",
+            source_name: "mandatory_recovery",
+        }),
+        prompt_version => anyhow::bail!(
+            "unsupported single-feature inference identity: model `{model_id}`, prompt version `{}`",
+            prompt_version.unwrap_or("missing")
+        ),
+    }
 }
 
 fn calibrate_samples(
@@ -1118,6 +1174,24 @@ fn compare_f64(left: f64, right: f64) -> Ordering {
 mod tests {
     use super::*;
 
+    fn run_record(model_id: &str, prompt_version: &str) -> RunRecord {
+        RunRecord {
+            target_key: "trace-1".into(),
+            mandatory_facts_omitted: 0,
+            decision: DecisionRecord {
+                target_key: "trace-1".into(),
+                target_revision: "revision-1".into(),
+                trace_context_binding_id: "binding-1".into(),
+                raw_logit_difference: Some(0.5),
+                inference: InferenceRecord {
+                    model_id: model_id.into(),
+                    prompt_version: Some(prompt_version.into()),
+                },
+            },
+            nli_diagnostics: None,
+        }
+    }
+
     fn sample(_key: &str, group: &str, incomplete: bool, feature: f64) -> Sample {
         Sample {
             group_key: group.into(),
@@ -1171,6 +1245,36 @@ mod tests {
         assert_eq!(report.metrics.f1, 1.0);
         assert_eq!(report.metrics.mcc, 1.0);
         assert_eq!(report.folds.len(), 5);
+    }
+
+    #[test]
+    fn single_feature_identity_distinguishes_cloud_from_smollm() {
+        let cloud = run_record("gpt-5.6-sol", CLOUD_PROMPT_VERSION);
+        let identity = single_feature_identity([&cloud].into_iter()).unwrap();
+        assert_eq!(
+            identity.feature_set_version,
+            CLOUD_SINGLE_FEATURE_SET_VERSION
+        );
+        assert_eq!(identity.feature_name, "cloud_compact_incomplete_logit");
+
+        let local = run_record("smollm3-3b", SMOLLM_PROMPT_VERSION);
+        let identity = single_feature_identity([&local].into_iter()).unwrap();
+        assert_eq!(
+            identity.feature_set_version,
+            SMOLLM_SINGLE_FEATURE_SET_VERSION
+        );
+        assert_eq!(
+            identity.feature_name,
+            "smollm_mandatory_recovery_incomplete_logit"
+        );
+    }
+
+    #[test]
+    fn single_feature_identity_rejects_mixed_runs() {
+        let cloud = run_record("gpt-5.6-sol", CLOUD_PROMPT_VERSION);
+        let local = run_record("smollm3-3b", SMOLLM_PROMPT_VERSION);
+        let error = single_feature_identity([&cloud, &local].into_iter()).unwrap_err();
+        assert!(error.to_string().contains("one model and prompt version"));
     }
 
     #[test]
