@@ -21,6 +21,7 @@ mod reanalyze;
 mod replay;
 mod score;
 mod task_completion;
+mod task_completion_calibrator;
 mod task_completion_compact;
 mod task_completion_models;
 
@@ -636,6 +637,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-cpu-calibrate" => {
+            let labels = args
+                .next()
+                .ok_or_else(|| "task-completion-cpu-calibrate requires labels".to_string())?;
+            let split = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| "task-completion-cpu-calibrate requires a split".to_string())?;
+            let output = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires an output report".to_string()
+            })?;
+            let goal_final = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires goal+final results".to_string()
+            })?;
+            let mandatory = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires mandatory results".to_string()
+            })?;
+            let mandatory_recovery = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires mandatory+recovery results".to_string()
+            })?;
+            let complete = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires complete-projection results".to_string()
+            })?;
+            let nli = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate requires ModernBERT NLI results".to_string()
+            })?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion_calibrator::calibrate(
+                Path::new(&labels),
+                &split,
+                task_completion_calibrator::LearnedResultPaths {
+                    goal_final: Path::new(&goal_final),
+                    mandatory: Path::new(&mandatory),
+                    mandatory_recovery: Path::new(&mandatory_recovery),
+                    complete: Path::new(&complete),
+                    nli: Path::new(&nli),
+                },
+            )?;
+            task_completion_calibrator::write_report(&report, Path::new(&output))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "profile" => {
             let workspace = args
                 .next()
@@ -696,6 +741,6 @@ fn inspect_source(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} task-completion-smollm-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID MODEL_HASH [THRESHOLD] [CONCURRENCY] [LIMIT]\n  {program} task-completion-modernbert-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH NEUTRAL_POLICY [THRESHOLD] [LIMIT]\n  {program} task-completion-binary-score RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json [THRESHOLD]\n  {program} task-completion-binary-calibrate RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
+        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} task-completion-smollm-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID MODEL_HASH [THRESHOLD] [CONCURRENCY] [LIMIT]\n  {program} task-completion-modernbert-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH NEUTRAL_POLICY [THRESHOLD] [LIMIT]\n  {program} task-completion-binary-score RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json [THRESHOLD]\n  {program} task-completion-binary-calibrate RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-cpu-calibrate LABELS.jsonl SPLIT OUTPUT.json GOAL_FINAL.jsonl MANDATORY.jsonl MANDATORY_RECOVERY.jsonl COMPLETE.jsonl NLI.jsonl\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
     )
 }
