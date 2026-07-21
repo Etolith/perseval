@@ -35,6 +35,8 @@ const MCC_EXIT: f64 = 0.200;
 struct ModelRunRecord {
     schema_version: String,
     target_key: String,
+    #[serde(default)]
+    mandatory_facts_omitted: u32,
     decision: BinaryTaskCompletionDecisionV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -221,6 +223,7 @@ impl SmolCompletionClient {
         Ok(ModelRunRecord {
             schema_version: RUN_SCHEMA_VERSION.into(),
             target_key: projection.target_key,
+            mandatory_facts_omitted: projection.stats.mandatory_facts_omitted,
             decision,
             error,
             nli_diagnostics: None,
@@ -447,6 +450,7 @@ impl ModernBertNliClient {
         Ok(ModelRunRecord {
             schema_version: RUN_SCHEMA_VERSION.into(),
             target_key: projection.target_key,
+            mandatory_facts_omitted: projection.stats.mandatory_facts_omitted,
             decision,
             error: None,
             nli_diagnostics: Some(NliDiagnostics {
@@ -730,6 +734,8 @@ pub struct BinaryScoreReport {
     auroc: Option<f64>,
     brier_score: f64,
     expected_calibration_error: f64,
+    mandatory_facts_omitted: u64,
+    mandatory_evidence_pass: bool,
     f1_must_exceed: f64,
     mcc_must_exceed: f64,
     f1_pass: bool,
@@ -755,11 +761,14 @@ pub fn score(
     let mut probability_rows = Vec::new();
     let mut abstained = 0_u64;
     let mut labeled = 0_u64;
+    let mut mandatory_facts_omitted = 0_u64;
     for (target_key, result) in results {
         let Some(label) = labels.get(&target_key) else {
             continue;
         };
         labeled += 1;
+        mandatory_facts_omitted =
+            mandatory_facts_omitted.saturating_add(u64::from(result.mandatory_facts_omitted));
         let Some(probability_complete) = result.decision.probability_complete else {
             abstained += 1;
             continue;
@@ -783,6 +792,7 @@ pub fn score(
     let (auroc, brier_score, expected_calibration_error) = probability_quality(&probability_rows);
     let f1_pass = metrics.f1 > F1_EXIT;
     let mcc_pass = metrics.mcc.is_some_and(|value| value > MCC_EXIT);
+    let mandatory_evidence_pass = mandatory_facts_omitted == 0;
     Ok(BinaryScoreReport {
         schema_version: SCORE_SCHEMA_VERSION.into(),
         split: split.into(),
@@ -800,11 +810,13 @@ pub fn score(
         auroc,
         brier_score,
         expected_calibration_error,
+        mandatory_facts_omitted,
+        mandatory_evidence_pass,
         f1_must_exceed: F1_EXIT,
         mcc_must_exceed: MCC_EXIT,
         f1_pass,
         mcc_pass,
-        exit_pass: f1_pass && mcc_pass,
+        exit_pass: f1_pass && mcc_pass && mandatory_evidence_pass,
     })
 }
 
@@ -814,11 +826,14 @@ pub fn calibrate(results: &Path, labels: &Path, split: &str) -> Result<BinarySco
     let mut rows = Vec::new();
     let mut abstained = 0_u64;
     let mut labeled = 0_u64;
+    let mut mandatory_facts_omitted = 0_u64;
     for (target_key, result) in &results {
         let Some(label) = labels.get(target_key) else {
             continue;
         };
         labeled += 1;
+        mandatory_facts_omitted =
+            mandatory_facts_omitted.saturating_add(u64::from(result.mandatory_facts_omitted));
         match result.decision.probability_complete {
             Some(probability) => rows.push((!label.resolved, probability)),
             None => abstained += 1,
@@ -843,6 +858,7 @@ pub fn calibrate(results: &Path, labels: &Path, split: &str) -> Result<BinarySco
     let (auroc, brier_score, expected_calibration_error) = probability_quality(&probability_rows);
     let f1_pass = metrics.f1 > F1_EXIT;
     let mcc_pass = metrics.mcc.is_some_and(|value| value > MCC_EXIT);
+    let mandatory_evidence_pass = mandatory_facts_omitted == 0;
     Ok(BinaryScoreReport {
         schema_version: SCORE_SCHEMA_VERSION.into(),
         split: split.into(),
@@ -856,11 +872,13 @@ pub fn calibrate(results: &Path, labels: &Path, split: &str) -> Result<BinarySco
         auroc,
         brier_score,
         expected_calibration_error,
+        mandatory_facts_omitted,
+        mandatory_evidence_pass,
         f1_must_exceed: F1_EXIT,
         mcc_must_exceed: MCC_EXIT,
         f1_pass,
         mcc_pass,
-        exit_pass: f1_pass && mcc_pass,
+        exit_pass: f1_pass && mcc_pass && mandatory_evidence_pass,
     })
 }
 
