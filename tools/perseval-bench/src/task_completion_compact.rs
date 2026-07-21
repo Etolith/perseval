@@ -22,7 +22,7 @@ use traces_to_evals::{
 
 use crate::task_completion::{SuiteRecord, SuiteSpan, load_selected_suite};
 
-const PROJECTOR_VERSION: &str = "perseval.compact-task-completion-projector.v1";
+const PROJECTOR_VERSION: &str = "perseval.compact-task-completion-projector.v2";
 const MAX_INPUT_TOKENS: u32 = 6_144;
 const RUBRIC: &str = "Judge whether the active user request was completed from the supplied trace facts. Choose A only when the requested outcome and verification are supported by evidence. Choose B when work is incomplete, failed, abandoned, contradicted, or unsupported. A final assistant claim is not proof. Errors followed by related recovery evidence must be considered together. Return exactly one label: A = completed, B = incomplete.";
 
@@ -557,6 +557,7 @@ async fn assemble_projection<C: TokenCounter>(
     all_chains: Vec<TaskCompletionRecoveryChainV1>,
     tokenizer: &C,
 ) -> Result<CompactTaskCompletionProjectionV1, Box<dyn Error>> {
+    let agent_context = string_list_attribute(&record.root.attributes, "perseval.agent.context");
     let selected_ids = selected
         .iter()
         .map(|candidate| candidate.fact.evidence_id.as_str())
@@ -595,7 +596,11 @@ async fn assemble_projection<C: TokenCounter>(
             requested_side_effects: Vec::new(),
             requested_verification: Vec::new(),
             constraints: Vec::new(),
-            agent_context: vec!["Software-engineering agent operating in a repository.".into()],
+            agent_context: if agent_context.is_empty() {
+                vec!["Agent operating in the task environment represented by this trace.".into()]
+            } else {
+                agent_context
+            },
             superseded_requirements: Vec::new(),
             token_count: 1,
         },
@@ -700,8 +705,10 @@ fn render_sections(
     [
         format!("<rubric>\n{RUBRIC}\n</rubric>\n"),
         format!(
-            "<goal>\nPrimary request: {}\nSuccess criterion: fulfill the active request.\nAgent context: software-engineering repository agent.\n</goal>\n",
-            projection.goal.primary_request
+            "<goal>\nPrimary request: {}\nSuccess criteria:\n{}\nAgent context:\n{}\n</goal>\n",
+            projection.goal.primary_request,
+            render_list(&projection.goal.success_criteria),
+            render_list(&projection.goal.agent_context),
         ),
         format!(
             "<final_response>\n{}\n</final_response>\n",
@@ -732,6 +739,31 @@ fn render_sections(
             all_count.saturating_sub(projection.facts.len())
         ),
     ]
+}
+
+fn render_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "- Unspecified.".into();
+    }
+    values
+        .iter()
+        .map(|value| format!("- {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn string_list_attribute(attributes: &BTreeMap<String, Value>, key: &str) -> Vec<String> {
+    match attributes.get(key) {
+        Some(Value::String(value)) if !value.trim().is_empty() => vec![value.trim().into()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(Into::into)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 pub(super) fn render_projection_prompt(projection: &CompactTaskCompletionProjectionV1) -> String {
@@ -1052,6 +1084,35 @@ mod tests {
         .unwrap();
         assert_eq!(projection.recovery_chains.len(), 1);
         assert_eq!(projection.recovery_chains[0].evidence_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn projection_uses_trace_specific_agent_context() {
+        let mut input = record();
+        input.root.attributes.insert(
+            "perseval.agent.context".into(),
+            json!([
+                "Browser agent operating in WebArena.",
+                "Success depends on web state."
+            ]),
+        );
+        let projection = project_record(
+            &input,
+            CompactTaskCompletionVariantV1::MandatoryWithRecovery,
+            &WordCounter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            projection.goal.agent_context,
+            vec![
+                "Browser agent operating in WebArena.",
+                "Success depends on web state."
+            ]
+        );
+        let prompt = render_projection_prompt(&projection);
+        assert!(prompt.contains("Browser agent operating in WebArena."));
+        assert!(!prompt.contains("software-engineering repository agent"));
     }
 
     #[tokio::test]

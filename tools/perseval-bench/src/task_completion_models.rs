@@ -567,6 +567,16 @@ pub async fn run_smollm(
         anyhow::ensure!(limit > 0, "limit must be greater than zero");
         projections.truncate(limit);
     }
+    // Continuous batching is substantially faster when prompts in a chunk have
+    // similar lengths. The target key remains the deterministic tie breaker,
+    // completed records are still sorted before they are persisted, and a
+    // caller-supplied limit retains its original target-key selection semantics.
+    projections.sort_by(|left, right| {
+        left.token_budget
+            .projected_tokens
+            .cmp(&right.token_budget.projected_tokens)
+            .then_with(|| left.target_key.cmp(&right.target_key))
+    });
     anyhow::ensure!(!projections.is_empty(), "no projections selected");
     let selected_projections = projections.len() as u64;
     let existing = if output.is_file() {
