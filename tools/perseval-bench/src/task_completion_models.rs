@@ -15,8 +15,8 @@ use traces_to_evals::{
     BINARY_TASK_COMPLETION_DECISION_SCHEMA_VERSION, BinaryTaskCompletionDecisionV1,
     BinaryTaskCompletionOutcomeV1, ChatClient, ChatRequest, CompactTaskCompletionProjectionV1,
     LearnedAbstentionReasonV1, OpenAiChatClient, ProviderExecutionFailureV1,
-    ProviderResponseEnvelopeV1, ResponseSchema, TaskCompletionInferenceProvenanceV1,
-    canonical_content_id,
+    ProviderResponseEnvelopeV1, ResponseSchema, TaskCompletionEvidenceLaneV1,
+    TaskCompletionInferenceProvenanceV1, TraceFactKindV1, TraceFactStatusV1, canonical_content_id,
 };
 
 use tokenizers::{EncodeInput, Tokenizer, TruncationParams, TruncationStrategy};
@@ -30,11 +30,43 @@ const CLOUD_PROMPT_VERSION: &str = "perseval.compact-task-completion-cloud-v1";
 const NLI_PROMPT_VERSION: &str = "perseval.binary-task-completion-nli-v1";
 const NLI_HYPOTHESIS: &str = "The agent completed every active requirement in the user's request, including required verification and external side effects.";
 const NLI_MAX_TOKENS: usize = 2_048;
+const SEMANTIC_NLI_MAX_TOKENS: usize = 512;
+const SEMANTIC_NLI_SCHEMA_VERSION: &str = "perseval.task_completion_semantic_nli.v1";
+pub const SEMANTIC_FEATURE_SET_VERSION: &str =
+    "perseval.task_completion_requirement_evidence_nli.v1";
+const SEMANTIC_PROMPT_VERSION: &str = "perseval.requirement-evidence-nli-v1";
+const MAX_SEMANTIC_REQUIREMENTS: usize = 3;
+const MAX_OBSERVED_CANDIDATES: usize = 8;
+const SEMANTIC_TEXT_CHAR_LIMIT: usize = 600;
 const COMPLETE_VERBALIZER: &str = " A";
 const INCOMPLETE_VERBALIZER: &str = " B";
 const F1_EXIT: f64 = 0.206;
 const MCC_EXIT: f64 = 0.200;
 const CLOUD_SYSTEM_PROMPT: &str = "Judge whether the active user request was completed from the supplied compact trace evidence. Completed requires evidence that every active requirement and required side effect was fulfilled. A final assistant claim is not proof. Consider an error together with any later recovery and verification. Choose incomplete when required work is missing, failed, abandoned, contradicted, or unsupported. Choose abstain only when the supplied projection genuinely lacks the evidence needed to decide. Cite at most three supplied evidence identifiers. Return probability_complete as your best probability that the task was completed; it must agree with the chosen label at threshold 0.5.";
+
+pub const SEMANTIC_FEATURE_NAMES: [&str; 21] = [
+    "requirement_count_log1p",
+    "observed_candidate_count_log1p",
+    "pair_count_log1p",
+    "truncated_pair_fraction",
+    "mean_input_token_ratio",
+    "min_observed_support",
+    "mean_observed_support",
+    "max_observed_support",
+    "min_observed_support_margin",
+    "mean_observed_support_margin",
+    "max_observed_contradiction",
+    "mean_observed_contradiction",
+    "max_observed_contradiction_margin",
+    "mean_observed_neutral",
+    "observed_support_argmax_fraction",
+    "observed_contradiction_argmax_fraction",
+    "observed_neutral_argmax_fraction",
+    "mean_claim_support",
+    "max_claim_support",
+    "mean_claim_observed_gap",
+    "max_claim_observed_gap",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelRunRecord {
@@ -111,6 +143,52 @@ struct ModernBertNliClient {
     neutral_policy: NliNeutralPolicy,
 }
 
+struct SemanticNliClient {
+    tokenizer: Tokenizer,
+    session: Session,
+    pad_id: u32,
+    model_id: String,
+    model_hash: String,
+    tokenizer_hash: String,
+    evaluator_release_id: String,
+    label_order: NliLabelOrder,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NliLabelOrder {
+    entailment: usize,
+    neutral: usize,
+    contradiction: usize,
+}
+
+impl NliLabelOrder {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "entailment_neutral_contradiction" => Ok(Self {
+                entailment: 0,
+                neutral: 1,
+                contradiction: 2,
+            }),
+            "contradiction_entailment_neutral" => Ok(Self {
+                contradiction: 0,
+                entailment: 1,
+                neutral: 2,
+            }),
+            _ => anyhow::bail!(
+                "unsupported NLI label order {value:?}; expected entailment_neutral_contradiction or contradiction_entailment_neutral"
+            ),
+        }
+    }
+
+    fn labels(self) -> [&'static str; 3] {
+        let mut labels = [""; 3];
+        labels[self.entailment] = "entailment";
+        labels[self.neutral] = "neutral";
+        labels[self.contradiction] = "contradiction";
+        labels
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NliLogits {
     entailment: f64,
@@ -124,6 +202,70 @@ struct NliDiagnostics {
     probabilities: NliLogits,
     neutral_argmax: bool,
     input_truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PairInference {
+    probabilities: NliLogits,
+    input_tokens: u32,
+    input_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticNliFeatureRecordV1 {
+    pub schema_version: String,
+    pub feature_set_version: String,
+    pub semantic_record_id: String,
+    pub target_key: String,
+    pub target_revision: String,
+    pub trace_context_binding_id: String,
+    pub projection_hash: String,
+    pub projector_version: String,
+    pub evaluator_release_id: String,
+    pub model_id: String,
+    pub model_hash: String,
+    pub tokenizer_hash: String,
+    pub prompt_version: String,
+    pub requirements: Vec<SemanticRequirementScoreV1>,
+    pub feature_names: Vec<String>,
+    pub feature_values: Vec<f64>,
+    pub pair_count: u32,
+    pub input_tokens: u32,
+    pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticRequirementScoreV1 {
+    pub requirement_id: String,
+    pub requirement_kind: String,
+    pub observed_support: Option<SemanticEvidenceScoreV1>,
+    pub observed_contradiction: Option<SemanticEvidenceScoreV1>,
+    pub claim_support: Option<SemanticEvidenceScoreV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticEvidenceScoreV1 {
+    pub evidence_ids: Vec<String>,
+    pub entailment: f64,
+    pub neutral: f64,
+    pub contradiction: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticNliRunReport {
+    schema_version: String,
+    feature_set_version: String,
+    model_id: String,
+    model_hash: String,
+    tokenizer_hash: String,
+    prompt_version: String,
+    selected_projections: usize,
+    requirement_count: u64,
+    pair_count: u64,
+    truncated_pairs: u64,
+    input_tokens: u64,
+    summed_latency_ms: u64,
+    output: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -821,6 +963,623 @@ impl ModernBertNliClient {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SemanticRequirement {
+    id: String,
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticEvidenceChannel {
+    Observed,
+    Claim,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticCandidate {
+    evidence_ids: Vec<String>,
+    text: String,
+    channel: SemanticEvidenceChannel,
+    priority: u8,
+    sequence: u32,
+}
+
+impl SemanticNliClient {
+    fn load(
+        model_path: &Path,
+        tokenizer_path: &Path,
+        model_id: &str,
+        model_hash: &str,
+        tokenizer_hash: &str,
+        label_order: &str,
+    ) -> Result<Self> {
+        validate_sha256(model_hash, "model_hash")?;
+        validate_sha256(tokenizer_hash, "tokenizer_hash")?;
+        anyhow::ensure!(model_path.is_file(), "ONNX model does not exist");
+        anyhow::ensure!(tokenizer_path.is_file(), "tokenizer does not exist");
+        let label_order = NliLabelOrder::parse(label_order)?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|error| anyhow::anyhow!("failed to load tokenizer: {error}"))?;
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: SEMANTIC_NLI_MAX_TOKENS,
+                strategy: TruncationStrategy::LongestFirst,
+                ..TruncationParams::default()
+            }))
+            .map_err(|error| anyhow::anyhow!("failed to configure tokenizer: {error}"))?;
+        tokenizer.with_padding(None);
+        let pad_id = tokenizer
+            .token_to_id("[PAD]")
+            .or_else(|| tokenizer.token_to_id("<pad>"))
+            .context("tokenizer has no supported padding token")?;
+        let session = Session::builder()?
+            .with_intra_threads(4)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .commit_from_file(model_path)?;
+        let input_names = session
+            .inputs()
+            .iter()
+            .map(|input| input.name().to_string())
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            input_names == BTreeSet::from(["attention_mask".into(), "input_ids".into()]),
+            "unsupported semantic NLI inputs: {input_names:?}"
+        );
+        let output_names = session
+            .outputs()
+            .iter()
+            .map(|output| output.name().to_string())
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            output_names.contains("logits"),
+            "semantic NLI model has no logits output: {output_names:?}"
+        );
+        let evaluator_release_id = canonical_content_id(
+            "perseval.requirement-evidence-nli-evaluator.v1",
+            &json!({
+                "model_id": model_id,
+                "model_hash": model_hash,
+                "tokenizer_hash": tokenizer_hash,
+                "prompt_version": SEMANTIC_PROMPT_VERSION,
+                "max_tokens": SEMANTIC_NLI_MAX_TOKENS,
+                "label_order": label_order.labels(),
+                "max_requirements": MAX_SEMANTIC_REQUIREMENTS,
+                "max_observed_candidates": MAX_OBSERVED_CANDIDATES,
+                "semantic_text_char_limit": SEMANTIC_TEXT_CHAR_LIMIT,
+            }),
+        )?;
+        Ok(Self {
+            tokenizer,
+            session,
+            pad_id,
+            model_id: model_id.into(),
+            model_hash: model_hash.into(),
+            tokenizer_hash: tokenizer_hash.into(),
+            evaluator_release_id,
+            label_order,
+        })
+    }
+
+    fn infer_pairs(&mut self, pairs: &[(String, String)]) -> Result<(Vec<PairInference>, u64)> {
+        anyhow::ensure!(!pairs.is_empty(), "cannot infer an empty pair batch");
+        let encodings = pairs
+            .iter()
+            .map(|(premise, hypothesis)| {
+                self.tokenizer
+                    .encode(
+                        EncodeInput::Dual(premise.as_str().into(), hypothesis.as_str().into()),
+                        true,
+                    )
+                    .map_err(|error| anyhow::anyhow!("failed to tokenize NLI pair: {error}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sequence_length = encodings
+            .iter()
+            .map(tokenizers::Encoding::len)
+            .max()
+            .context("semantic NLI encodings are empty")?;
+        let mut input_ids = Vec::with_capacity(encodings.len() * sequence_length);
+        let mut attention_mask = Vec::with_capacity(encodings.len() * sequence_length);
+        for encoding in &encodings {
+            input_ids.extend(encoding.get_ids().iter().map(|value| i64::from(*value)));
+            attention_mask.extend(
+                encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|value| i64::from(*value)),
+            );
+            input_ids.resize(
+                input_ids.len() + sequence_length - encoding.len(),
+                i64::from(self.pad_id),
+            );
+            attention_mask.resize(attention_mask.len() + sequence_length - encoding.len(), 0);
+        }
+        let batch_size = encodings.len();
+        let input_ids =
+            Tensor::from_array(([batch_size, sequence_length], input_ids.into_boxed_slice()))?;
+        let attention_mask = Tensor::from_array((
+            [batch_size, sequence_length],
+            attention_mask.into_boxed_slice(),
+        ))?;
+        let started = Instant::now();
+        let outputs = self.session.run(ort::inputs![
+            "input_ids" => input_ids,
+            "attention_mask" => attention_mask,
+        ])?;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let (_, values) = outputs["logits"].try_extract_tensor::<f32>()?;
+        anyhow::ensure!(
+            values.len() == batch_size * 3,
+            "expected {} semantic NLI logits, got {}",
+            batch_size * 3,
+            values.len()
+        );
+        let inferences = encodings
+            .iter()
+            .enumerate()
+            .map(|(index, encoding)| {
+                let values = &values[index * 3..index * 3 + 3];
+                let logits = NliLogits {
+                    entailment: f64::from(values[self.label_order.entailment]),
+                    neutral: f64::from(values[self.label_order.neutral]),
+                    contradiction: f64::from(values[self.label_order.contradiction]),
+                };
+                anyhow::ensure!(
+                    logits.entailment.is_finite()
+                        && logits.neutral.is_finite()
+                        && logits.contradiction.is_finite(),
+                    "semantic NLI logits must be finite"
+                );
+                Ok(PairInference {
+                    probabilities: softmax_three(&logits),
+                    input_tokens: u32::try_from(encoding.len())?,
+                    input_truncated: !encoding.get_overflowing().is_empty(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((inferences, latency_ms))
+    }
+
+    fn evaluate_projection(
+        &mut self,
+        projection: CompactTaskCompletionProjectionV1,
+    ) -> Result<SemanticNliFeatureRecordV1> {
+        projection.validate()?;
+        anyhow::ensure!(
+            projection.stats.mandatory_facts_omitted == 0,
+            "semantic NLI requires all mandatory facts"
+        );
+        let requirements = semantic_requirements(&projection)?;
+        let candidates = semantic_candidates(&projection);
+        let mut pair_metadata = Vec::new();
+        let mut pairs = Vec::new();
+        for (requirement_index, requirement) in requirements.iter().enumerate() {
+            for (candidate_index, candidate) in candidates.iter().enumerate() {
+                let premise = match candidate.channel {
+                    SemanticEvidenceChannel::Observed => {
+                        format!(
+                            "Observed trace evidence:\n{}",
+                            bounded_semantic_text(&candidate.text)
+                        )
+                    }
+                    SemanticEvidenceChannel::Claim => {
+                        format!(
+                            "Agent final claim:\n{}",
+                            bounded_semantic_text(&candidate.text)
+                        )
+                    }
+                };
+                let hypothesis = format!(
+                    "The agent completed this requirement:\n{}",
+                    bounded_semantic_text(&requirement.text)
+                );
+                pairs.push((premise, hypothesis));
+                pair_metadata.push((requirement_index, candidate_index));
+            }
+        }
+        anyhow::ensure!(!pairs.is_empty(), "semantic NLI found no evidence pairs");
+        let (inferences, latency_ms) = self.infer_pairs(&pairs)?;
+        let requirement_scores = requirements
+            .iter()
+            .enumerate()
+            .map(|(requirement_index, requirement)| {
+                let members = pair_metadata
+                    .iter()
+                    .zip(&inferences)
+                    .filter_map(|((pair_requirement, candidate_index), inference)| {
+                        (*pair_requirement == requirement_index)
+                            .then_some((&candidates[*candidate_index], inference))
+                    })
+                    .collect::<Vec<_>>();
+                SemanticRequirementScoreV1 {
+                    requirement_id: requirement.id.clone(),
+                    requirement_kind: requirement.kind.clone(),
+                    observed_support: best_semantic_evidence(
+                        &members,
+                        SemanticEvidenceChannel::Observed,
+                        |score| score.probabilities.entailment,
+                    ),
+                    observed_contradiction: best_semantic_evidence(
+                        &members,
+                        SemanticEvidenceChannel::Observed,
+                        |score| score.probabilities.contradiction,
+                    ),
+                    claim_support: best_semantic_evidence(
+                        &members,
+                        SemanticEvidenceChannel::Claim,
+                        |score| score.probabilities.entailment,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let feature_values = semantic_feature_values(
+            &requirement_scores,
+            candidates
+                .iter()
+                .filter(|candidate| candidate.channel == SemanticEvidenceChannel::Observed)
+                .count(),
+            &inferences,
+        );
+        let feature_names = SEMANTIC_FEATURE_NAMES.map(String::from).to_vec();
+        let input_tokens = inferences
+            .iter()
+            .try_fold(0_u32, |sum, inference| {
+                sum.checked_add(inference.input_tokens)
+            })
+            .context("semantic input token count overflowed")?;
+        let pair_count = u32::try_from(inferences.len())?;
+        let semantic_record_id = canonical_content_id(
+            SEMANTIC_NLI_SCHEMA_VERSION,
+            &json!({
+                "feature_set_version": SEMANTIC_FEATURE_SET_VERSION,
+                "target_key": projection.target_key,
+                "target_revision": projection.target_revision,
+                "trace_context_binding_id": projection.trace_context_binding_id,
+                "projection_hash": projection.projection_hash,
+                "projector_version": projection.projector_version,
+                "evaluator_release_id": self.evaluator_release_id,
+                "model_id": self.model_id,
+                "model_hash": self.model_hash,
+                "tokenizer_hash": self.tokenizer_hash,
+                "prompt_version": SEMANTIC_PROMPT_VERSION,
+                "requirements": requirement_scores,
+                "feature_names": feature_names,
+                "feature_values": feature_values,
+                "pair_count": pair_count,
+                "input_tokens": input_tokens,
+            }),
+        )?;
+        Ok(SemanticNliFeatureRecordV1 {
+            schema_version: SEMANTIC_NLI_SCHEMA_VERSION.into(),
+            feature_set_version: SEMANTIC_FEATURE_SET_VERSION.into(),
+            semantic_record_id,
+            target_key: projection.target_key,
+            target_revision: projection.target_revision,
+            trace_context_binding_id: projection.trace_context_binding_id,
+            projection_hash: projection.projection_hash,
+            projector_version: projection.projector_version,
+            evaluator_release_id: self.evaluator_release_id.clone(),
+            model_id: self.model_id.clone(),
+            model_hash: self.model_hash.clone(),
+            tokenizer_hash: self.tokenizer_hash.clone(),
+            prompt_version: SEMANTIC_PROMPT_VERSION.into(),
+            requirements: requirement_scores,
+            feature_names,
+            feature_values,
+            pair_count,
+            input_tokens,
+            latency_ms,
+        })
+    }
+}
+
+fn semantic_requirements(
+    projection: &CompactTaskCompletionProjectionV1,
+) -> Result<Vec<SemanticRequirement>> {
+    let mut candidates = vec![("primary_request", projection.goal.primary_request.as_str())];
+    candidates.extend(
+        projection
+            .goal
+            .amendments
+            .iter()
+            .map(|value| ("amendment", value.as_str())),
+    );
+    candidates.extend(
+        projection
+            .goal
+            .requested_side_effects
+            .iter()
+            .map(|value| ("requested_side_effect", value.as_str())),
+    );
+    candidates.extend(
+        projection
+            .goal
+            .requested_verification
+            .iter()
+            .map(|value| ("requested_verification", value.as_str())),
+    );
+    candidates.extend(
+        projection
+            .goal
+            .success_criteria
+            .iter()
+            .filter(|value| !value.eq_ignore_ascii_case("Fulfill the active user request."))
+            .map(|value| ("success_criterion", value.as_str())),
+    );
+    let mut seen = BTreeSet::new();
+    let mut requirements = Vec::new();
+    for (kind, text) in candidates {
+        let normalized = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized) {
+            continue;
+        }
+        let id = canonical_content_id(
+            "perseval.task-completion-requirement.v1",
+            &json!({
+                "projection_hash": projection.projection_hash,
+                "kind": kind,
+                "text": text,
+            }),
+        )?;
+        requirements.push(SemanticRequirement {
+            id,
+            kind: kind.into(),
+            text: text.into(),
+        });
+        if requirements.len() == MAX_SEMANTIC_REQUIREMENTS {
+            break;
+        }
+    }
+    anyhow::ensure!(
+        !requirements.is_empty(),
+        "projection contains no active requirement"
+    );
+    Ok(requirements)
+}
+
+fn bounded_semantic_text(value: &str) -> String {
+    let count = value.chars().count();
+    if count <= SEMANTIC_TEXT_CHAR_LIMIT {
+        return value.into();
+    }
+    let side = (SEMANTIC_TEXT_CHAR_LIMIT.saturating_sub(40)) / 2;
+    let head = value.chars().take(side).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}\n[semantic text omitted]\n{tail}")
+}
+
+fn semantic_candidates(projection: &CompactTaskCompletionProjectionV1) -> Vec<SemanticCandidate> {
+    let facts_by_id = projection
+        .facts
+        .iter()
+        .map(|fact| (fact.evidence_id.as_str(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = projection
+        .recovery_chains
+        .iter()
+        .map(|chain| SemanticCandidate {
+            evidence_ids: chain.evidence_ids.clone(),
+            text: chain
+                .evidence_ids
+                .iter()
+                .filter_map(|id| facts_by_id.get(id.as_str()))
+                .map(|fact| format!("[{}] {}", fact.evidence_id, fact.summary))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            channel: SemanticEvidenceChannel::Observed,
+            priority: 0,
+            sequence: chain
+                .evidence_ids
+                .iter()
+                .filter_map(|id| facts_by_id.get(id.as_str()))
+                .map(|fact| fact.sequence)
+                .max()
+                .unwrap_or(0),
+        })
+        .collect::<Vec<_>>();
+    observed.extend(projection.facts.iter().filter_map(|fact| {
+        if matches!(
+            fact.kind,
+            TraceFactKindV1::UserRequest | TraceFactKindV1::UserClarification
+        ) || fact.lane == TaskCompletionEvidenceLaneV1::FinalResponse
+        {
+            return None;
+        }
+        let priority = match (fact.kind, fact.status) {
+            (TraceFactKindV1::Verification, _) => 0,
+            (TraceFactKindV1::ExternalAction | TraceFactKindV1::ArtifactMutation, _) => 1,
+            (_, TraceFactStatusV1::Failed | TraceFactStatusV1::Cancelled) => 2,
+            (TraceFactKindV1::ToolResult | TraceFactKindV1::ChildAgentResult, _) => 3,
+            _ => 4,
+        };
+        Some(SemanticCandidate {
+            evidence_ids: vec![fact.evidence_id.clone()],
+            text: format!("[{}] {}", fact.evidence_id, fact.summary),
+            channel: SemanticEvidenceChannel::Observed,
+            priority,
+            sequence: fact.sequence,
+        })
+    }));
+    observed.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| right.sequence.cmp(&left.sequence))
+            .then_with(|| left.evidence_ids.cmp(&right.evidence_ids))
+    });
+    observed.truncate(MAX_OBSERVED_CANDIDATES);
+    let mut candidates = observed;
+    if let Some(claim) = projection
+        .facts
+        .iter()
+        .filter(|fact| fact.lane == TaskCompletionEvidenceLaneV1::FinalResponse)
+        .max_by_key(|fact| fact.sequence)
+    {
+        candidates.push(SemanticCandidate {
+            evidence_ids: vec![claim.evidence_id.clone()],
+            text: format!("[{}] {}", claim.evidence_id, claim.summary),
+            channel: SemanticEvidenceChannel::Claim,
+            priority: 0,
+            sequence: claim.sequence,
+        });
+    }
+    if candidates.is_empty()
+        && let Some(last) = projection.facts.iter().max_by_key(|fact| fact.sequence)
+    {
+        candidates.push(SemanticCandidate {
+            evidence_ids: vec![last.evidence_id.clone()],
+            text: format!("[{}] {}", last.evidence_id, last.summary),
+            channel: SemanticEvidenceChannel::Observed,
+            priority: 5,
+            sequence: last.sequence,
+        });
+    }
+    candidates
+}
+
+fn best_semantic_evidence(
+    members: &[(&SemanticCandidate, &PairInference)],
+    channel: SemanticEvidenceChannel,
+    score: impl Fn(&PairInference) -> f64,
+) -> Option<SemanticEvidenceScoreV1> {
+    members
+        .iter()
+        .filter(|(candidate, _)| candidate.channel == channel)
+        .max_by(|left, right| score(left.1).total_cmp(&score(right.1)))
+        .map(|(candidate, inference)| SemanticEvidenceScoreV1 {
+            evidence_ids: candidate.evidence_ids.clone(),
+            entailment: inference.probabilities.entailment,
+            neutral: inference.probabilities.neutral,
+            contradiction: inference.probabilities.contradiction,
+        })
+}
+
+fn semantic_feature_values(
+    requirements: &[SemanticRequirementScoreV1],
+    observed_candidate_count: usize,
+    inferences: &[PairInference],
+) -> Vec<f64> {
+    let observed = requirements
+        .iter()
+        .map(|requirement| {
+            requirement
+                .observed_support
+                .as_ref()
+                .map(|support| {
+                    let contradiction = requirement
+                        .observed_contradiction
+                        .as_ref()
+                        .map_or(0.0, |value| value.contradiction);
+                    let contradiction_margin = requirement
+                        .observed_contradiction
+                        .as_ref()
+                        .map_or(-1.0, |value| {
+                            value.contradiction - value.entailment.max(value.neutral)
+                        });
+                    (
+                        support.entailment,
+                        support.entailment - support.contradiction.max(support.neutral),
+                        contradiction,
+                        contradiction_margin,
+                        support.neutral,
+                    )
+                })
+                .unwrap_or((0.0, -1.0, 0.0, -1.0, 1.0))
+        })
+        .collect::<Vec<_>>();
+    let claim_support = requirements
+        .iter()
+        .map(|requirement| {
+            requirement
+                .claim_support
+                .as_ref()
+                .map_or(0.0, |score| score.entailment)
+        })
+        .collect::<Vec<_>>();
+    let gaps = observed
+        .iter()
+        .zip(&claim_support)
+        .map(|(observed, claim)| claim - observed.0)
+        .collect::<Vec<_>>();
+    let support_argmax = observed
+        .iter()
+        .filter(|value| value.0 >= value.2 && value.0 >= value.4)
+        .count() as f64;
+    let contradiction_argmax = observed
+        .iter()
+        .filter(|value| value.2 > value.0 && value.2 >= value.4)
+        .count() as f64;
+    let neutral_argmax = observed.len() as f64 - support_argmax - contradiction_argmax;
+    let count = requirements.len() as f64;
+    let truncated = inferences
+        .iter()
+        .filter(|inference| inference.input_truncated)
+        .count() as f64;
+    let mean_tokens = inferences
+        .iter()
+        .map(|inference| inference.input_tokens as f64)
+        .sum::<f64>()
+        / inferences.len().max(1) as f64;
+    vec![
+        (requirements.len() as f64).ln_1p(),
+        (observed_candidate_count as f64).ln_1p(),
+        (inferences.len() as f64).ln_1p(),
+        truncated / inferences.len().max(1) as f64,
+        mean_tokens / SEMANTIC_NLI_MAX_TOKENS as f64,
+        observed
+            .iter()
+            .map(|value| value.0)
+            .reduce(f64::min)
+            .unwrap_or(0.0),
+        observed.iter().map(|value| value.0).sum::<f64>() / count,
+        observed
+            .iter()
+            .map(|value| value.0)
+            .reduce(f64::max)
+            .unwrap_or(0.0),
+        observed
+            .iter()
+            .map(|value| value.1)
+            .reduce(f64::min)
+            .unwrap_or(-1.0),
+        observed.iter().map(|value| value.1).sum::<f64>() / count,
+        observed
+            .iter()
+            .map(|value| value.2)
+            .reduce(f64::max)
+            .unwrap_or(0.0),
+        observed.iter().map(|value| value.2).sum::<f64>() / count,
+        observed
+            .iter()
+            .map(|value| value.3)
+            .reduce(f64::max)
+            .unwrap_or(-1.0),
+        observed.iter().map(|value| value.4).sum::<f64>() / count,
+        support_argmax / count,
+        contradiction_argmax / count,
+        neutral_argmax / count,
+        claim_support.iter().sum::<f64>() / count,
+        claim_support
+            .iter()
+            .copied()
+            .reduce(f64::max)
+            .unwrap_or(0.0),
+        gaps.iter().sum::<f64>() / count,
+        gaps.iter().copied().reduce(f64::max).unwrap_or(0.0),
+    ]
+}
+
 #[derive(Debug)]
 enum InferenceError {
     Unavailable(String),
@@ -1192,6 +1951,202 @@ pub fn run_modernbert_nli(
         writer.flush()?;
     }
     Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_semantic_nli(
+    projections: &Path,
+    output: &Path,
+    model_path: &Path,
+    tokenizer_path: &Path,
+    model_id: &str,
+    model_hash: &str,
+    tokenizer_hash: &str,
+    label_order: &str,
+    limit: Option<usize>,
+) -> Result<SemanticNliRunReport> {
+    anyhow::ensure!(projections.is_file(), "projection file does not exist");
+    let mut client = SemanticNliClient::load(
+        model_path,
+        tokenizer_path,
+        model_id,
+        model_hash,
+        tokenizer_hash,
+        label_order,
+    )?;
+    let mut projections = load_projections(projections)?;
+    projections.sort_by(|left, right| left.target_key.cmp(&right.target_key));
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit > 0, "limit must be greater than zero");
+        projections.truncate(limit);
+    }
+    anyhow::ensure!(!projections.is_empty(), "no projections selected");
+    let selected_projections = projections.len();
+    let existing = if output.is_file() {
+        load_semantic_feature_records(output)?
+    } else {
+        BTreeMap::new()
+    };
+    let selected = projections
+        .iter()
+        .map(|projection| (projection.target_key.as_str(), projection))
+        .collect::<BTreeMap<_, _>>();
+    for record in existing.values() {
+        let projection = selected.get(record.target_key.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing semantic record {} is not in the selected projections",
+                record.target_key
+            )
+        })?;
+        anyhow::ensure!(
+            record.target_revision == projection.target_revision
+                && record.trace_context_binding_id == projection.trace_context_binding_id
+                && record.projection_hash == projection.projection_hash,
+            "existing semantic record {} is bound to a stale projection",
+            record.target_key
+        );
+        anyhow::ensure!(
+            record.model_id == model_id
+                && record.model_hash == model_hash
+                && record.tokenizer_hash == tokenizer_hash
+                && record.evaluator_release_id == client.evaluator_release_id,
+            "existing semantic record {} used a different evaluator configuration",
+            record.target_key
+        );
+    }
+    projections.retain(|projection| !existing.contains_key(&projection.target_key));
+    let mut writer = BufWriter::new(OpenOptions::new().create(true).append(true).open(output)?);
+    let mut report = SemanticNliRunReport {
+        schema_version: SEMANTIC_NLI_SCHEMA_VERSION.into(),
+        feature_set_version: SEMANTIC_FEATURE_SET_VERSION.into(),
+        model_id: model_id.into(),
+        model_hash: model_hash.into(),
+        tokenizer_hash: tokenizer_hash.into(),
+        prompt_version: SEMANTIC_PROMPT_VERSION.into(),
+        selected_projections,
+        requirement_count: 0,
+        pair_count: 0,
+        truncated_pairs: 0,
+        input_tokens: 0,
+        summed_latency_ms: 0,
+        output: output.display().to_string(),
+    };
+    for record in existing.values() {
+        update_semantic_report(&mut report, record);
+    }
+    for projection in projections {
+        let record = client.evaluate_projection(projection)?;
+        update_semantic_report(&mut report, &record);
+        serde_json::to_writer(&mut writer, &record)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    Ok(report)
+}
+
+fn update_semantic_report(report: &mut SemanticNliRunReport, record: &SemanticNliFeatureRecordV1) {
+    report.requirement_count = report
+        .requirement_count
+        .saturating_add(record.requirements.len() as u64);
+    report.pair_count = report
+        .pair_count
+        .saturating_add(u64::from(record.pair_count));
+    let truncated_fraction = record.feature_values[3];
+    report.truncated_pairs = report
+        .truncated_pairs
+        .saturating_add((truncated_fraction * f64::from(record.pair_count)).round() as u64);
+    report.input_tokens = report
+        .input_tokens
+        .saturating_add(u64::from(record.input_tokens));
+    report.summed_latency_ms = report.summed_latency_ms.saturating_add(record.latency_ms);
+}
+
+pub fn load_semantic_feature_records(
+    path: &Path,
+) -> Result<BTreeMap<String, SemanticNliFeatureRecordV1>> {
+    let mut records = BTreeMap::new();
+    for (line_number, line) in BufReader::new(File::open(path)?).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: SemanticNliFeatureRecordV1 =
+            serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "invalid semantic NLI record at {}:{}",
+                    path.display(),
+                    line_number + 1
+                )
+            })?;
+        validate_semantic_feature_record(&record)?;
+        let key = record.target_key.clone();
+        anyhow::ensure!(
+            records.insert(key.clone(), record).is_none(),
+            "duplicate {key}"
+        );
+    }
+    anyhow::ensure!(
+        !records.is_empty(),
+        "{} contains no semantic features",
+        path.display()
+    );
+    Ok(records)
+}
+
+fn validate_semantic_feature_record(record: &SemanticNliFeatureRecordV1) -> Result<()> {
+    anyhow::ensure!(
+        record.schema_version == SEMANTIC_NLI_SCHEMA_VERSION,
+        "unsupported semantic NLI schema"
+    );
+    anyhow::ensure!(
+        record.feature_set_version == SEMANTIC_FEATURE_SET_VERSION,
+        "unsupported semantic feature set"
+    );
+    anyhow::ensure!(
+        record.prompt_version == SEMANTIC_PROMPT_VERSION,
+        "unsupported semantic prompt version"
+    );
+    anyhow::ensure!(
+        record.feature_names == SEMANTIC_FEATURE_NAMES.map(String::from),
+        "semantic feature names or ordering differ from {SEMANTIC_FEATURE_SET_VERSION}"
+    );
+    anyhow::ensure!(
+        record.feature_values.len() == SEMANTIC_FEATURE_NAMES.len()
+            && record.feature_values.iter().all(|value| value.is_finite()),
+        "invalid semantic feature vector for {}",
+        record.target_key
+    );
+    anyhow::ensure!(
+        !record.requirements.is_empty(),
+        "semantic record has no requirements"
+    );
+    let expected_id = canonical_content_id(
+        SEMANTIC_NLI_SCHEMA_VERSION,
+        &json!({
+            "feature_set_version": record.feature_set_version,
+            "target_key": record.target_key,
+            "target_revision": record.target_revision,
+            "trace_context_binding_id": record.trace_context_binding_id,
+            "projection_hash": record.projection_hash,
+            "projector_version": record.projector_version,
+            "evaluator_release_id": record.evaluator_release_id,
+            "model_id": record.model_id,
+            "model_hash": record.model_hash,
+            "tokenizer_hash": record.tokenizer_hash,
+            "prompt_version": record.prompt_version,
+            "requirements": record.requirements,
+            "feature_names": record.feature_names,
+            "feature_values": record.feature_values,
+            "pair_count": record.pair_count,
+            "input_tokens": record.input_tokens,
+        }),
+    )?;
+    anyhow::ensure!(
+        record.semantic_record_id == expected_id,
+        "semantic record identity does not match its content for {}",
+        record.target_key
+    );
+    Ok(())
 }
 
 fn load_projections(path: &Path) -> Result<Vec<CompactTaskCompletionProjectionV1>> {
@@ -1732,5 +2687,54 @@ mod tests {
         assert!(logit(1.0).is_finite());
         assert!(logit(0.0).is_finite());
         assert!((sigmoid(logit(0.73)) - 0.73).abs() < 1e-12);
+    }
+
+    #[test]
+    fn semantic_nli_label_order_is_explicit() {
+        let deberta = NliLabelOrder::parse("contradiction_entailment_neutral").unwrap();
+        assert_eq!(deberta.contradiction, 0);
+        assert_eq!(deberta.entailment, 1);
+        assert_eq!(deberta.neutral, 2);
+        assert_eq!(deberta.labels(), ["contradiction", "entailment", "neutral"]);
+        assert!(NliLabelOrder::parse("guessed").is_err());
+    }
+
+    #[test]
+    fn semantic_feature_vector_is_finite_and_versioned() {
+        let evidence = SemanticEvidenceScoreV1 {
+            evidence_ids: vec!["E0001".into()],
+            entailment: 0.8,
+            neutral: 0.1,
+            contradiction: 0.1,
+        };
+        let requirements = vec![SemanticRequirementScoreV1 {
+            requirement_id: "requirement-1".into(),
+            requirement_kind: "primary_request".into(),
+            observed_support: Some(evidence.clone()),
+            observed_contradiction: Some(evidence.clone()),
+            claim_support: Some(evidence),
+        }];
+        let inferences = vec![PairInference {
+            probabilities: NliLogits {
+                entailment: 0.8,
+                neutral: 0.1,
+                contradiction: 0.1,
+            },
+            input_tokens: 64,
+            input_truncated: false,
+        }];
+        let values = semantic_feature_values(&requirements, 1, &inferences);
+        assert_eq!(values.len(), SEMANTIC_FEATURE_NAMES.len());
+        assert!(values.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn semantic_text_bound_is_unicode_safe_and_keeps_both_ends() {
+        let value = format!("start-{}-end", "🧪".repeat(SEMANTIC_TEXT_CHAR_LIMIT));
+        let bounded = bounded_semantic_text(&value);
+        assert!(bounded.starts_with("start-"));
+        assert!(bounded.ends_with("-end"));
+        assert!(bounded.contains("[semantic text omitted]"));
+        assert!(bounded.chars().count() <= SEMANTIC_TEXT_CHAR_LIMIT);
     }
 }

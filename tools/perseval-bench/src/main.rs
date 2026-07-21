@@ -641,6 +641,70 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-semantic-nli-run" => {
+            let projections = args.next().ok_or_else(|| {
+                "task-completion-semantic-nli-run requires compact projections".to_string()
+            })?;
+            let output = args
+                .next()
+                .ok_or_else(|| "task-completion-semantic-nli-run requires an output".to_string())?;
+            let model_path = args.next().ok_or_else(|| {
+                "task-completion-semantic-nli-run requires an ONNX model".to_string()
+            })?;
+            let tokenizer_path = args.next().ok_or_else(|| {
+                "task-completion-semantic-nli-run requires a tokenizer".to_string()
+            })?;
+            let model_id = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-semantic-nli-run requires a model id".to_string()
+                })?;
+            let model_hash = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-semantic-nli-run requires a model hash".to_string()
+                })?;
+            let tokenizer_hash = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-semantic-nli-run requires a tokenizer hash".to_string()
+                })?;
+            let label_order = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-semantic-nli-run requires a label order".to_string()
+                })?;
+            let limit = args
+                .next()
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "limit is not UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion_models::run_semantic_nli(
+                Path::new(&projections),
+                Path::new(&output),
+                Path::new(&model_path),
+                Path::new(&tokenizer_path),
+                &model_id,
+                &model_hash,
+                &tokenizer_hash,
+                &label_order,
+                limit,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "task-completion-binary-score" | "task-completion-binary-calibrate" => {
             let results = args
                 .next()
@@ -805,6 +869,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        "task-completion-cpu-calibrate-semantic" => {
+            let labels = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate-semantic requires labels".to_string()
+            })?;
+            let split = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    "task-completion-cpu-calibrate-semantic requires a split".to_string()
+                })?;
+            let output = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate-semantic requires an output report".to_string()
+            })?;
+            let semantic = args.next().ok_or_else(|| {
+                "task-completion-cpu-calibrate-semantic requires semantic features".to_string()
+            })?;
+            let structured = args.next();
+            if args.next().is_some() {
+                return Err(usage(&program).into());
+            }
+            let report = task_completion_calibrator::calibrate_semantic(
+                Path::new(&labels),
+                &split,
+                Path::new(&semantic),
+                structured.as_deref().map(Path::new),
+            )?;
+            task_completion_calibrator::write_report(&report, Path::new(&output))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         "profile" => {
             let workspace = args
                 .next()
@@ -865,6 +959,6 @@ fn inspect_source(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} task-completion-smollm-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID MODEL_HASH [THRESHOLD] [CONCURRENCY] [LIMIT]\n  {program} task-completion-openai-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID [CONCURRENCY] [LIMIT]\n  {program} task-completion-modernbert-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH NEUTRAL_POLICY [THRESHOLD] [LIMIT]\n  {program} task-completion-binary-score RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json [THRESHOLD]\n  {program} task-completion-binary-calibrate RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-cpu-calibrate LABELS.jsonl SPLIT OUTPUT.json GOAL_FINAL.jsonl MANDATORY.jsonl MANDATORY_RECOVERY.jsonl COMPLETE.jsonl NLI.jsonl\n  {program} task-completion-cpu-calibrate-single LABELS.jsonl SPLIT OUTPUT.json RESULTS.jsonl\n  {program} task-completion-structured-features PROJECTIONS.jsonl RESULTS.jsonl OUTPUT.jsonl\n  {program} task-completion-cpu-calibrate-structured LABELS.jsonl SPLIT OUTPUT.json FEATURES.jsonl\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
+        "usage:\n  {program} fetch SOURCE_MANIFEST.json OUTPUT_DIRECTORY\n  {program} prepare SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} qualify SOURCE_MANIFEST.json TIER OUTPUT_DIRECTORY\n  {program} inspect-source SOURCE.parquet\n  {program} build-fixture SOURCE_MANIFEST.json SOURCE.parquet TIER OUTPUT_DIRECTORY\n  {program} build-detector-fixture OUTPUT_DIRECTORY\n  {program} guard FIXTURE.jsonl\n  {program} audit-isolation WORKSPACE\n  {program} replay ENDPOINT FIXTURE.jsonl PROJECT [BATCH_SIZE]\n  {program} reanalyze WORKSPACE [TIMEOUT_SECONDS]\n  {program} score WORKSPACE LABELS.jsonl OUTPUT.json [SOURCE_ID]\n  {program} score-assessments ASSESSMENT_EXPORT.json LABELS.jsonl OUTPUT.json\n  {program} score-detectors FIXTURE.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} score-default-detectors BEHAVIOR_FIXTURE.jsonl DETECTOR_LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-run TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT_DIRECTORY MODEL PROFILE [CONCURRENCY] [LIMIT]\n  {program} task-completion-score RECALL_RESULTS SPECIFICITY_RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-zero-shot-score RESULTS LABELS.jsonl OUTPUT.json\n  {program} task-completion-project TRACE_SUITE.jsonl LABELS.jsonl SPLIT OUTPUT.jsonl VARIANT [LIMIT]\n  {program} task-completion-smollm-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID MODEL_HASH [THRESHOLD] [CONCURRENCY] [LIMIT]\n  {program} task-completion-openai-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL_ID [CONCURRENCY] [LIMIT]\n  {program} task-completion-modernbert-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH NEUTRAL_POLICY [THRESHOLD] [LIMIT]\n  {program} task-completion-semantic-nli-run PROJECTIONS.jsonl OUTPUT.jsonl MODEL.onnx TOKENIZER.json MODEL_ID MODEL_HASH TOKENIZER_HASH LABEL_ORDER [LIMIT]\n  {program} task-completion-binary-score RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json [THRESHOLD]\n  {program} task-completion-binary-calibrate RESULTS.jsonl LABELS.jsonl SPLIT OUTPUT.json\n  {program} task-completion-cpu-calibrate LABELS.jsonl SPLIT OUTPUT.json GOAL_FINAL.jsonl MANDATORY.jsonl MANDATORY_RECOVERY.jsonl COMPLETE.jsonl NLI.jsonl\n  {program} task-completion-cpu-calibrate-single LABELS.jsonl SPLIT OUTPUT.json RESULTS.jsonl\n  {program} task-completion-structured-features PROJECTIONS.jsonl RESULTS.jsonl OUTPUT.jsonl\n  {program} task-completion-cpu-calibrate-structured LABELS.jsonl SPLIT OUTPUT.json FEATURES.jsonl\n  {program} task-completion-cpu-calibrate-semantic LABELS.jsonl SPLIT OUTPUT.json SEMANTIC.jsonl [STRUCTURED.jsonl]\n  {program} profile WORKSPACE OUTPUT.json [REPLAY_REPORT.json]"
     )
 }

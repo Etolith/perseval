@@ -14,6 +14,9 @@ use crate::task_completion_features::{
     FEATURE_NAMES as STRUCTURED_FEATURE_NAMES,
     FEATURE_SET_VERSION as STRUCTURED_FEATURE_SET_VERSION, load_feature_records,
 };
+use crate::task_completion_models::{
+    SEMANTIC_FEATURE_NAMES, SEMANTIC_FEATURE_SET_VERSION, load_semantic_feature_records,
+};
 
 const REPORT_SCHEMA_VERSION: &str = "perseval.task_completion_cpu_calibration.v2";
 const MODEL_SCHEMA_VERSION: &str = "perseval.task_completion_logistic_model.v1";
@@ -23,6 +26,7 @@ const SMOLLM_SINGLE_FEATURE_SET_VERSION: &str =
 const CLOUD_SINGLE_FEATURE_SET_VERSION: &str = "perseval.cloud_compact_task_completion_score.v1";
 const CLOUD_PROMPT_VERSION: &str = "perseval.compact-task-completion-cloud-v1";
 const SMOLLM_PROMPT_VERSION: &str = "perseval.binary-task-completion-ab-v1";
+const FUSED_FEATURE_SET_VERSION: &str = "perseval.task_completion_structured_semantic_fusion.v1";
 const FEATURE_NAMES: [&str; 6] = [
     "smollm_goal_final_logit",
     "smollm_mandatory_logit",
@@ -367,6 +371,86 @@ pub fn calibrate_structured(
             ("labels".into(), hash_file(labels_path)?),
             ("structured_features".into(), hash_file(features_path)?),
         ]),
+    )
+}
+
+pub fn calibrate_semantic(
+    labels_path: &Path,
+    split: &str,
+    semantic_features_path: &Path,
+    structured_features_path: Option<&Path>,
+) -> Result<CalibrationReport> {
+    anyhow::ensure!(
+        split == "baseline",
+        "CPU calibration only accepts the development split `baseline`; the frozen holdout must remain sealed"
+    );
+    let labels = load_labels(labels_path, split)?;
+    let semantic = load_semantic_feature_records(semantic_features_path)?;
+    let structured = structured_features_path
+        .map(load_feature_records)
+        .transpose()?;
+    let expected = labels
+        .iter()
+        .map(|label| label.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let semantic_keys = semantic.keys().cloned().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        semantic_keys == expected,
+        "semantic feature target set differs from selected labels (missing {}, extra {})",
+        expected.difference(&semantic_keys).count(),
+        semantic_keys.difference(&expected).count()
+    );
+    if let Some(structured) = &structured {
+        let structured_keys = structured.keys().cloned().collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            structured_keys == expected,
+            "structured feature target set differs from selected labels (missing {}, extra {})",
+            expected.difference(&structured_keys).count(),
+            structured_keys.difference(&expected).count()
+        );
+    }
+    let samples = labels
+        .iter()
+        .map(|label| {
+            let semantic = &semantic[&label.trace_id];
+            let mut values = structured.as_ref().map_or_else(Vec::new, |records| {
+                records[&label.trace_id].feature_values.clone()
+            });
+            values.extend_from_slice(&semantic.feature_values);
+            Ok(Sample {
+                group_key: label.group_key.clone(),
+                source: label.slice.source.clone(),
+                domain_family: label.slice.domain_family.clone(),
+                incomplete: !label.resolved,
+                features: values,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (feature_set_version, mut feature_names) = if structured.is_some() {
+        (
+            FUSED_FEATURE_SET_VERSION,
+            STRUCTURED_FEATURE_NAMES.map(String::from).to_vec(),
+        )
+    } else {
+        (SEMANTIC_FEATURE_SET_VERSION, Vec::new())
+    };
+    feature_names.extend(SEMANTIC_FEATURE_NAMES.map(String::from));
+    let mut source_sha256 = BTreeMap::from([
+        ("labels".into(), hash_file(labels_path)?),
+        (
+            "semantic_features".into(),
+            hash_file(semantic_features_path)?,
+        ),
+    ]);
+    if let Some(path) = structured_features_path {
+        source_sha256.insert("structured_features".into(), hash_file(path)?);
+    }
+    calibrate_samples(
+        split,
+        samples,
+        feature_set_version,
+        feature_names,
+        source_sha256,
     )
 }
 
