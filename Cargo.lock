@@ -7651,7 +7651,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "traces-to-evals"
 version = "0.1.0"
-source = "git+https://github.com/Etolith/traces-to-evals?rev=dbeaa5eea36ff4a61c7f9e0ad052dbecc6791603#dbeaa5eea36ff4a61c7f9e0ad052dbecc6791603"
+source = "git+https://github.com/Etolith/traces-to-evals?rev=c21dc6dd4de873bd22a415f93330e63018f7024d#c21dc6dd4de873bd22a415f93330e63018f7024d"
 dependencies = [
  "anyhow",
  "async-trait",

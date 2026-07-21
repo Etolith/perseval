@@ -52,14 +52,14 @@ pub struct RunOptions<'a> {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SuiteRecord {
-    schema_version: u32,
-    suite_version: String,
-    sample_id: String,
-    root: SuiteSpan,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(super) struct SuiteRecord {
+    pub(super) schema_version: u32,
+    pub(super) suite_version: String,
+    pub(super) sample_id: String,
+    pub(super) root: SuiteSpan,
     #[serde(default)]
-    spans: Vec<SuiteSpan>,
+    pub(super) spans: Vec<SuiteSpan>,
 }
 
 /// Deliberately excludes `resolved` and every gold field. This is the only
@@ -73,21 +73,21 @@ struct SelectionLabel {
     split: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SuiteSpan {
-    name: String,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(super) struct SuiteSpan {
+    pub(super) name: String,
     #[serde(default)]
-    kind: Option<String>,
+    pub(super) kind: Option<String>,
     #[serde(default)]
-    status: Option<String>,
+    pub(super) status: Option<String>,
     #[serde(default)]
-    duration_ms: Option<u64>,
+    pub(super) duration_ms: Option<u64>,
     #[serde(default)]
-    input: Option<String>,
+    pub(super) input: Option<String>,
     #[serde(default)]
-    output: Option<String>,
+    pub(super) output: Option<String>,
     #[serde(default)]
-    attributes: BTreeMap<String, Value>,
+    pub(super) attributes: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +305,26 @@ fn load_selection_labels(path: &Path) -> Result<BTreeMap<String, SelectionLabel>
         }
     }
     Ok(labels)
+}
+
+pub(super) fn load_selected_suite(
+    suite_path: &Path,
+    labels_path: &Path,
+    split: &str,
+    limit: Option<usize>,
+) -> Result<Vec<SuiteRecord>, Box<dyn Error>> {
+    let labels = load_selection_labels(labels_path)?;
+    let mut suite = load_suite(suite_path)?;
+    suite.retain(|record| {
+        labels
+            .get(&record.sample_id)
+            .is_some_and(|label| split == "all" || label.split.as_deref() == Some(split))
+    });
+    suite.sort_by(|left, right| left.sample_id.cmp(&right.sample_id));
+    if let Some(limit) = limit {
+        suite.truncate(limit);
+    }
+    Ok(suite)
 }
 
 fn load_suite(path: &Path) -> Result<Vec<SuiteRecord>, Box<dyn Error>> {
