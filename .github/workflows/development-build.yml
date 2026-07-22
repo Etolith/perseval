@@ -39,7 +39,7 @@ jobs:
         run: ditto -c -k --keepParent target/macos/Perseval.app target/macos/Perseval-development.zip
 
       - name: Upload the development bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Perseval-macOS-${{ github.sha }}
           path: target/macos/Perseval-development.zip
