@@ -1,0 +1,20 @@
+[package]
+name = "perseval-model-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Verified local ONNX model artifacts for Perseval learned evaluators"
+publish = false
+
+[dependencies]
+ort.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+traces-to-evals.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

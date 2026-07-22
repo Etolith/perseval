@@ -3,6 +3,7 @@ members = [
     "apps/perseval-app",
     "crates/perseval-ingest",
     "crates/perseval-mcp",
+    "crates/perseval-model-runtime",
     "crates/perseval-service",
     "crates/perseval-store",
     "tools/perseval-bench",
@@ -27,6 +28,7 @@ gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "20340e14874a3b55122e
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "20340e14874a3b55122e5cb2aa0d023874e08b2d", package = "gpui_platform", features = ["font-kit"] }
 hex = "0.4"
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "with-serde"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls", "api-24"] }
 perseval-ingest = { path = "crates/perseval-ingest" }
 perseval-service = { path = "crates/perseval-service" }
 perseval-store = { path = "crates/perseval-store" }
@@ -43,6 +45,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "1.1"
 tower = "0.5"
-traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "dbeaa5eea36ff4a61c7f9e0ad052dbecc6791603", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }
+traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "bcdfe74aed362eba92f70da95587b735316101b7", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }
 unicode-segmentation = "1.12"
 zstd = "0.13"

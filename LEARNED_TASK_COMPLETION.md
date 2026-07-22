@@ -75,10 +75,43 @@ flagged-failure precision, and auto-pass negative predictive value.
   raw provider payloads are not exposed through the default read-only MCP
   catalog.
 
+## Local model artifact contract
+
+Perseval can verify and execute an approved task-completion model as an ONNX
+artifact without embedding private training code or data in this repository.
+An artifact directory contains `manifest.json`, the hashed ONNX model, an
+optional hashed tokenizer, and hashed Python/ONNX parity fixtures. The manifest
+pins the projector, training-record and 39-feature contracts, base-model
+revision, dataset hash, training version, and calibration version.
+
+The Rust runtime rejects path traversal, missing or altered files, incompatible
+trace contracts, mismatched tensor names, non-finite logits, and stale
+calibration metadata. It applies the versioned temperature and threshold after
+ONNX inference. These checks can be run without opening a benchmark holdout:
+
+```text
+cargo run -p perseval-model-runtime --bin perseval-model -- verify ARTIFACT_DIRECTORY
+cargo run -p perseval-model-runtime --bin perseval-model -- parity ARTIFACT_DIRECTORY
+```
+
+Sealed compact projections can be converted to label-free, revision-bound
+training records through the reusable `traces-to-evals` contract:
+
+```text
+cargo run -p perseval-model-runtime --bin perseval-model -- training-records PROJECTIONS.jsonl RECORDS.jsonl
+```
+
+Source identities, split assignments, labels, teacher prompts, raw traces,
+training jobs, diagnostics, and unreleased checkpoints remain outside the
+public application repository. No model is enabled by default until its frozen
+development runs satisfy the documented quality gates; passing artifact parity
+is necessary but does not establish model quality.
+
 ## Current scope
 
-This milestone ships Task Completion, evidence inspection, human review, and
-calibration. It does not ship hallucination or the other evaluator families,
+This milestone ships Task Completion, evidence inspection, human review,
+calibration, and the verified local ONNX runtime boundary. It does not ship an
+approved local model, hallucination or the other evaluator families,
 learned failure discovery, active learning, regression test-set creation,
 release experiments, live learned evaluation, or MCP execution of quality
 checks. The current Arize comparison is a frozen engineering baseline; it does
