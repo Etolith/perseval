@@ -21,7 +21,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Check out Perseval
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
