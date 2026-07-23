@@ -8,7 +8,7 @@ pub(crate) enum WorkerGroup {
 }
 
 struct SupervisedWorker {
-    name: &'static str,
+    name: String,
     group: WorkerGroup,
     handle: JoinHandle<()>,
 }
@@ -24,6 +24,16 @@ pub(crate) struct WorkerSupervisor {
 
 impl WorkerSupervisor {
     pub(crate) fn add(&self, name: &'static str, group: WorkerGroup, handle: JoinHandle<()>) {
+        let name = handle.thread().name().map_or_else(
+            || name.to_owned(),
+            |thread_name| {
+                if thread_name == name {
+                    name.to_owned()
+                } else {
+                    format!("{name} ({thread_name})")
+                }
+            },
+        );
         self.workers
             .lock()
             .expect("worker supervisor lock poisoned")
@@ -77,5 +87,28 @@ impl WorkerSupervisor {
                 .map(|worker| format!("{} exited", worker.name)),
         );
         failures
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::{WorkerGroup, WorkerSupervisor};
+
+    #[test]
+    fn panic_diagnostics_include_the_concrete_thread_name() {
+        let supervisor = WorkerSupervisor::default();
+        let thread = thread::Builder::new()
+            .name("perseval-analysis-7".into())
+            .spawn(|| panic!("test worker panic"))
+            .unwrap();
+        supervisor.add("analysis", WorkerGroup::Background, thread);
+        supervisor.join_group(WorkerGroup::Background);
+
+        assert_eq!(
+            supervisor.unexpected_exits(),
+            vec!["analysis (perseval-analysis-7) panicked"]
+        );
     }
 }

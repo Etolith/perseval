@@ -137,8 +137,14 @@ pub struct LocalOnnxTaskCompletionRunner {
 
 impl LocalOnnxTaskCompletionRunner {
     pub fn load(artifact_dir: &Path) -> anyhow::Result<Self> {
+        let runtime = TaskCompletionOnnxRuntime::load(artifact_dir)?;
+        if runtime.manifest().tokenizer_file.is_none() {
+            anyhow::bail!(
+                "the local task-completion artifact must include a tokenizer for compact projection"
+            );
+        }
         Ok(Self {
-            runtime: Mutex::new(TaskCompletionOnnxRuntime::load(artifact_dir)?),
+            runtime: Mutex::new(runtime),
             projector: CompactTaskCompletionProjector::default(),
         })
     }
@@ -183,30 +189,33 @@ impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
                 "The local learned judge found that completion was unsupported or incomplete.",
             ),
         };
-        let evidence = if verdict == LearnedVerdictV1::Fail {
-            compact
-                .facts
-                .iter()
-                .filter(|fact| fact.mandatory && fact.status != TraceFactStatusV1::Succeeded)
-                .chain(compact.facts.iter().filter(|fact| fact.mandatory))
-                .chain(compact.facts.iter())
-                .find_map(|fact| {
-                    projection
-                        .evidence_catalog
-                        .entries
-                        .get(&fact.evidence_key)
-                        .map(|record| EvaluationEvidenceCitationV1 {
-                            evidence_key: fact.evidence_key.clone(),
-                            evidence_kind: record.evidence_kind,
-                            location: record.location.clone(),
-                            criterion_id: None,
-                        })
-                })
-                .into_iter()
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let evidence =
+            if verdict == LearnedVerdictV1::Fail {
+                compact
+                    .facts
+                    .iter()
+                    .filter(|fact| fact.mandatory && fact.status != TraceFactStatusV1::Succeeded)
+                    .chain(compact.facts.iter().filter(|fact| {
+                        fact.mandatory && fact.status == TraceFactStatusV1::Succeeded
+                    }))
+                    .chain(compact.facts.iter().filter(|fact| !fact.mandatory))
+                    .find_map(|fact| {
+                        projection
+                            .evidence_catalog
+                            .entries
+                            .get(&fact.evidence_key)
+                            .map(|record| EvaluationEvidenceCitationV1 {
+                                evidence_key: fact.evidence_key.clone(),
+                                evidence_kind: record.evidence_kind,
+                                location: record.location.clone(),
+                                criterion_id: None,
+                            })
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let evaluation = LearnedEvaluationV1 {
             schema_version: LEARNED_EVALUATION_SCHEMA_VERSION.into(),
             evaluator_release_id: evaluator_release.release_id()?,
