@@ -120,6 +120,26 @@ fn run_filters_are_applied_before_counting_and_pagination() {
         .unwrap();
     assert_eq!(first_page.len(), 1);
     assert_eq!(first_page[0].logical_trace_id, "needle-oldest");
+
+    let padded_search = RunFiltersV1 {
+        search: Some("  NEEDLE  ".into()),
+        ..RunFiltersV1::default()
+    };
+    assert_eq!(store.run_count_filtered(&padded_search).unwrap(), 1);
+
+    let whitespace_search = RunFiltersV1 {
+        search: Some("   ".into()),
+        ..RunFiltersV1::default()
+    };
+    assert_eq!(store.run_count_filtered(&whitespace_search).unwrap(), 2);
+    assert_eq!(
+        store
+            .list_runs_filtered_ordered(&whitespace_search, RunOrderV1::Newest, 0, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(first_page[0].logical_trace_id, "needle-oldest");
     assert!(
         store
             .list_runs_filtered_ordered(&filters, RunOrderV1::Newest, 1, 1)

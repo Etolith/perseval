@@ -78,7 +78,7 @@ impl WorkspaceStore {
                         .analysis_status
                         .map(AnalysisStatus::as_str)
                         .unwrap_or(""),
-                    filters.search.as_deref().unwrap_or(""),
+                    normalized_run_search(filters.search.as_deref()),
                     scope.started_after_unix_nano.map(|value| value as i64),
                     scope.started_before_unix_nano.map(|value| value as i64),
                     limit as i64,
@@ -137,7 +137,7 @@ impl WorkspaceStore {
                     .analysis_status
                     .map(AnalysisStatus::as_str)
                     .unwrap_or(""),
-                filters.search.as_deref().unwrap_or(""),
+                normalized_run_search(filters.search.as_deref()),
                 scope.started_after_unix_nano.map(|value| value as i64),
                 scope.started_before_unix_nano.map(|value| value as i64),
             ],
@@ -626,4 +626,11 @@ impl WorkspaceStore {
             )
             .map_err(StoreError::from)
     }
+}
+
+fn normalized_run_search(search: Option<&str>) -> &str {
+    search
+        .map(str::trim)
+        .filter(|search| !search.is_empty())
+        .unwrap_or("")
 }
