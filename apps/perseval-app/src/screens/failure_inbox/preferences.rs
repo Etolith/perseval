@@ -192,7 +192,7 @@ impl FailureInbox {
     }
 
     fn apply_current_view(&mut self, cx: &mut Context<Self>) {
-        let view = &self.preferences.current;
+        let view = self.preferences.current.clone();
         self.filters.severity = view.severity;
         self.filters.recovery = view.recovery;
         self.filters.detector_id = view.detector_id.clone();
