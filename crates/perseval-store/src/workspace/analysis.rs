@@ -355,7 +355,7 @@ fn eval_batch_selection_hash(
     let mut hasher = Sha256::new();
     hasher.update(b"perseval.eval_batch.selection.v1");
     hasher.update(encoded);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn candidate_generation_job_id(project_id: &str, idempotency_key: &str) -> String {
@@ -365,5 +365,5 @@ fn candidate_generation_job_id(project_id: &str, idempotency_key: &str) -> Strin
     hasher.update(project_id.as_bytes());
     hasher.update(idempotency_key.len().to_be_bytes());
     hasher.update(idempotency_key.as_bytes());
-    format!("eval-job:sha256:{:x}", hasher.finalize())
+    format!("eval-job:sha256:{}", hex::encode(hasher.finalize()))
 }

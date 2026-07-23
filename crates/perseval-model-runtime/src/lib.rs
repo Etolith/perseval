@@ -895,7 +895,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..bytes]);
     }
-    Ok(format!("sha256:{:x}", digest.finalize()))
+    Ok(format!("sha256:{}", hex::encode(digest.finalize())))
 }
 
 fn require_sha256(value: &str, field: &str) -> Result<()> {

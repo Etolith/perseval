@@ -57,7 +57,7 @@ fn file_digest(path: &std::path::Path) -> String {
         }
         hasher.update(&buffer[..read]);
     }
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn field(id: &str, value: serde_json::Value, source_snapshot_id: &str) -> ContextFieldV1 {
