@@ -192,17 +192,18 @@ impl FailureInbox {
     }
 
     fn apply_current_view(&mut self, cx: &mut Context<Self>) {
-        let view = &self.preferences.current;
+        let view = self.preferences.current.clone();
         self.filters.severity = view.severity;
         self.filters.recovery = view.recovery;
-        self.filters.detector_id = view.detector_id.clone();
+        self.filters.detector_id = view.detector_id;
         let mut criteria = self.filters.scope.criteria.clone();
-        criteria.service_name = view.service_name.clone();
+        criteria.service_name = view.service_name;
         self.filters.scope = QueryScopeV1::new(criteria);
-        self.filters.search = view.search.clone();
+        let search = view.search;
         self.search_input.update(cx, |input, cx| {
-            input.set_text(view.search.clone().unwrap_or_default(), cx)
+            input.set_text(search.clone().unwrap_or_default(), cx)
         });
+        self.filters.search = search;
         self.reload_groups(cx);
         cx.notify();
     }

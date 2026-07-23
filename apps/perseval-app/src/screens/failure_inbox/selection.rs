@@ -144,8 +144,8 @@ impl FailureInbox {
                 for index in
                     inclusive_selection_indices(anchor_index, target_index, self.groups.len())
                 {
-                    self.selected_group_ids
-                        .insert(self.groups[index].group_id.clone());
+                    let group_id = self.groups[index].group_id.clone();
+                    self.selected_group_ids.insert(group_id);
                 }
             }
         } else {
