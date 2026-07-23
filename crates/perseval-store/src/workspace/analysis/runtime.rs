@@ -330,7 +330,7 @@ impl WorkspaceStore {
                 }),
                 attributes: safe_analysis_attributes(&persisted_json::decode_json_column(
                     &attributes_json,
-                    9,
+                    6,
                     "analysis span attributes",
                 )?),
             })

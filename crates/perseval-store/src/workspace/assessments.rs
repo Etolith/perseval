@@ -2301,7 +2301,9 @@ fn validate_task_completion_release_config(
             }
             Some(requested_model)
         }
-        EvaluationImplementationV1::LocalClassifier { .. } => None,
+        EvaluationImplementationV1::LocalClassifier {
+            model_artifact_id, ..
+        } => Some(model_artifact_id),
         _ => {
             return Err(StoreError::Invalid(
                 "task-completion execution supports prompt judges and local classifiers".into(),

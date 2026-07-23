@@ -438,7 +438,7 @@ impl WorkspaceStore {
                             trace_state: String::new(),
                             attributes: persisted_json::decode_json_column(
                                 &attributes,
-                                3,
+                                2,
                                 "span link attributes",
                             )?,
                             dropped_attributes_count: 0,

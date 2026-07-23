@@ -403,7 +403,8 @@ pub fn validate_release_binding(
     ] {
         if actual != expected {
             return Err(invalid(format!(
-                "evaluator {field} does not match the verified local artifact"
+                "evaluator {field} does not match the verified local artifact: expected \
+                 {expected}, got {actual}"
             )));
         }
     }
@@ -1048,7 +1049,11 @@ mod tests {
         {
             *runtime_version = "wrong-runtime".into();
         }
-        assert!(validate_release_binding(&manifest, &release).is_err());
+        let error = validate_release_binding(&manifest, &release)
+            .expect_err("a mismatched runtime must fail release binding")
+            .to_string();
+        assert!(error.contains(TASK_COMPLETION_ONNX_RUNTIME_VERSION));
+        assert!(error.contains("wrong-runtime"));
     }
 
     #[test]
