@@ -476,6 +476,8 @@ pub struct RunFiltersV1 {
     pub scope: QueryScopeV1,
     pub lifecycle: Option<TraceLifecycle>,
     pub identity_quality: Option<IdentityQualityV1>,
+    pub analysis_status: Option<AnalysisStatus>,
+    pub search: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

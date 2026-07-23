@@ -709,7 +709,8 @@ fn opening_a_v2_failure_projection_adds_v3_columns_and_backfills_atomically() {
     let control = rusqlite::Connection::open(layout.control_database()).unwrap();
     control
         .execute_batch(
-            "DROP TABLE active_failure_evidence_refs;
+            "DELETE FROM schema_migrations WHERE version = 23;
+             DROP TABLE active_failure_evidence_refs;
              DROP TABLE active_failure_diagnostics;
              DROP TABLE active_failure_group_detectors;
              DROP TABLE active_failure_findings;

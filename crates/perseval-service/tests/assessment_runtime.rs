@@ -678,6 +678,46 @@ fn migration_18_and_zero_finding_assessment_round_trip() {
 }
 
 #[test]
+fn local_task_completion_release_binds_the_requested_model_to_its_artifact() {
+    let (_directory, store) = setup();
+    let (context_release_id, _) = activate_context(&store);
+    let (mut evaluator, mut config) = task_completion_release(&context_release_id);
+    let model_artifact_id = digest('1');
+    evaluator.implementation = EvaluationImplementationV1::LocalClassifier {
+        model_artifact_id: model_artifact_id.clone(),
+        tokenizer_artifact_id: digest('2'),
+        feature_schema_id: digest('3'),
+        runtime_version: "perseval-task-completion-onnx-v1".into(),
+    };
+    config.evaluator_release_id = evaluator.release_id().unwrap();
+    config.requested_model = model_artifact_id;
+
+    store
+        .activate_task_completion_evaluator_release(
+            "project-a",
+            &evaluator,
+            &config,
+            "human-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap();
+
+    config.requested_model = digest('4');
+    assert!(
+        store
+            .activate_task_completion_evaluator_release(
+                "project-a",
+                &evaluator,
+                &config,
+                "human-reviewer",
+                ReviewAuthorityV1::Human,
+            )
+            .is_err(),
+        "a local release must reject a requested model that is not its model artifact"
+    );
+}
+
+#[test]
 fn task_completion_preview_commit_and_projection_are_exact_and_stale_safe() {
     let (directory, store) = setup();
     let (context_release_id, _) = activate_context(&store);

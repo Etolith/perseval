@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use perseval_store::{
-    RunFiltersV1, RunOrderV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1, SpanUpsertV1,
-    WorkspaceStore, WorkspaceStoreLayout,
+    AnalysisStatus, RunFiltersV1, RunOrderV1, SPAN_UPSERT_SCHEMA_VERSION, SpanUpsertBatchV1,
+    SpanUpsertV1, WorkspaceStore, WorkspaceStoreLayout,
 };
 use rusqlite::{Connection, params};
 
@@ -98,6 +98,130 @@ fn run_order_is_global_and_applied_before_pagination() {
         .list_runs_filtered_ordered(&RunFiltersV1::default(), RunOrderV1::MostSpans, 0, 1)
         .unwrap();
     assert_eq!(most_spans[0].logical_trace_id, "middle");
+}
+
+#[test]
+fn run_filters_are_applied_before_counting_and_pagination() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = WorkspaceStore::open(&WorkspaceStoreLayout::new(workspace.path()), "test").unwrap();
+
+    ingest(&store, "newest-unrelated", &[300]);
+    ingest(&store, "needle-oldest", &[100]);
+
+    let filters = RunFiltersV1 {
+        analysis_status: Some(AnalysisStatus::NotReady),
+        search: Some("NEEDLE".into()),
+        ..RunFiltersV1::default()
+    };
+
+    assert_eq!(store.run_count_filtered(&filters).unwrap(), 1);
+    let first_page = store
+        .list_runs_filtered_ordered(&filters, RunOrderV1::Newest, 0, 1)
+        .unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0].logical_trace_id, "needle-oldest");
+
+    let padded_search = RunFiltersV1 {
+        search: Some("  NEEDLE  ".into()),
+        ..RunFiltersV1::default()
+    };
+    assert_eq!(store.run_count_filtered(&padded_search).unwrap(), 1);
+
+    let whitespace_search = RunFiltersV1 {
+        search: Some("   ".into()),
+        ..RunFiltersV1::default()
+    };
+    assert_eq!(store.run_count_filtered(&whitespace_search).unwrap(), 2);
+    assert_eq!(
+        store
+            .list_runs_filtered_ordered(&whitespace_search, RunOrderV1::Newest, 0, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(first_page[0].logical_trace_id, "needle-oldest");
+    assert!(
+        store
+            .list_runs_filtered_ordered(&filters, RunOrderV1::Newest, 1, 1)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn corrupt_persisted_span_json_is_reported() {
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = WorkspaceStoreLayout::new(workspace.path());
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
+    ingest(&store, "trace", &[100]);
+    drop(store);
+
+    let analytics_path = layout.analytics_directory().join("traces.duckdb");
+    let analytics = duckdb::Connection::open(analytics_path).unwrap();
+    analytics
+        .execute(
+            "UPDATE spans SET attributes_json = '{not-json' WHERE logical_trace_id = 'trace'",
+            [],
+        )
+        .unwrap();
+    drop(analytics);
+
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
+    let error = store.get_span("trace", 1, "span-0").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid JSON in persisted span attributes")
+    );
+}
+
+#[test]
+fn legacy_schema_is_reconciled_once_then_uses_incremental_migrations() {
+    let workspace = tempfile::tempdir().unwrap();
+    let layout = WorkspaceStoreLayout::new(workspace.path());
+    let legacy = Connection::open(layout.control_database()).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+             INSERT INTO schema_migrations(version) VALUES (1);",
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
+    drop(store);
+    let control = Connection::open(layout.control_database()).unwrap();
+    let applied_at = control
+        .query_row(
+            "SELECT applied_at_unix_ms FROM schema_migrations WHERE version = 22",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(applied_at > 0);
+    assert!(
+        control
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'threshold_policy_releases')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
+    drop(control);
+
+    let store = WorkspaceStore::open(&layout, "test").unwrap();
+    drop(store);
+    let control = Connection::open(layout.control_database()).unwrap();
+    let reopened_applied_at = control
+        .query_row(
+            "SELECT applied_at_unix_ms FROM schema_migrations WHERE version = 22",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(reopened_applied_at, applied_at);
 }
 
 #[test]

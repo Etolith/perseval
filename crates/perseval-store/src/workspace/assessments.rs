@@ -2299,15 +2299,18 @@ fn validate_task_completion_release_config(
                         .into(),
                 ));
             }
-            requested_model
+            Some(requested_model)
         }
+        EvaluationImplementationV1::LocalClassifier {
+            model_artifact_id, ..
+        } => Some(model_artifact_id),
         _ => {
             return Err(StoreError::Invalid(
-                "the first task-completion vertical slice requires a prompt judge".into(),
+                "task-completion execution supports prompt judges and local classifiers".into(),
             ));
         }
     };
-    if requested_model != &config.requested_model
+    if requested_model.is_some_and(|model| model != &config.requested_model)
         || evaluator.projection_release_id
             != config
                 .projector

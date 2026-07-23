@@ -8,15 +8,19 @@ use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use traces_to_evals::{
-    COMPACT_TASK_COMPLETION_PROJECTION_SCHEMA_VERSION,
+use traceeval_contracts::{
+    COMPACT_TASK_COMPLETION_PROJECTION_SCHEMA_VERSION, CompactTaskCompletionProjectionV1,
+    EvaluationImplementationV1, EvaluatorReleaseSpecV1, LearnedTaskKind,
     TASK_COMPLETION_STRUCTURED_FEATURE_SET_VERSION, TASK_COMPLETION_TRAINING_RECORD_SCHEMA_VERSION,
+    TaskCompletionEvidenceFeatureRecordV1,
 };
 
 pub const TASK_COMPLETION_MODEL_MANIFEST_SCHEMA_VERSION: &str =
     "perseval.task_completion_model_manifest.v1";
 pub const TASK_COMPLETION_PARITY_FIXTURE_SCHEMA_VERSION: &str =
     "perseval.task_completion_onnx_parity.v1";
+pub const TASK_COMPLETION_ONNX_RUNTIME_VERSION: &str = "perseval.task_completion_onnx.v1";
+pub const TASK_COMPLETION_STRUCTURED_INPUT_NAME: &str = "structured_features";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -168,6 +172,7 @@ pub struct ParityReportV1 {
 pub struct TaskCompletionOnnxRuntime {
     manifest: TaskCompletionModelManifestV1,
     session: Session,
+    tokenizer: Option<tokenizers::Tokenizer>,
 }
 
 impl TaskCompletionOnnxRuntime {
@@ -175,11 +180,51 @@ impl TaskCompletionOnnxRuntime {
         let (manifest, report) = verify_artifact(artifact_dir)?;
         let session = Session::builder()?.commit_from_file(report.model_path)?;
         validate_session_contract(&session, &manifest)?;
-        Ok(Self { manifest, session })
+        let tokenizer = report
+            .tokenizer_path
+            .map(tokenizers::Tokenizer::from_file)
+            .transpose()
+            .map_err(|error| invalid(format!("tokenizer artifact is invalid: {error}")))?;
+        Ok(Self {
+            manifest,
+            session,
+            tokenizer,
+        })
     }
 
     pub fn manifest(&self) -> &TaskCompletionModelManifestV1 {
         &self.manifest
+    }
+
+    /// Verify that the immutable evaluator release names exactly the artifacts
+    /// and schemas loaded by this runtime. A local model may never be selected
+    /// merely because it happens to be present on disk.
+    pub fn bind_to_release(&self, release: &EvaluatorReleaseSpecV1) -> Result<()> {
+        validate_release_binding(&self.manifest, release)
+    }
+
+    /// Count with the tokenizer shipped and hash-verified alongside the model.
+    /// Compact projections use this counter instead of bytes or whitespace.
+    pub fn count_tokens(&self, text: &str) -> Result<u32> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| invalid("the local classifier artifact has no tokenizer"))?;
+        let encoding = tokenizer
+            .encode(text, false)
+            .map_err(|error| invalid(format!("tokenization failed: {error}")))?;
+        u32::try_from(encoding.len()).map_err(|_| invalid("token count exceeds u32"))
+    }
+
+    /// Projected structured evidence is the stable boundary between trace
+    /// extraction and the learned model. Feature order comes exclusively from
+    /// the versioned contract, never from a hand-maintained Rust array.
+    pub fn decide_projection(
+        &mut self,
+        projection: &CompactTaskCompletionProjectionV1,
+    ) -> Result<TaskCompletionDecisionV1> {
+        let input = structured_feature_input(projection)?;
+        self.decide(&[input])
     }
 
     pub fn infer(&mut self, inputs: &[TensorFixtureV1]) -> Result<Vec<ExpectedTensorV1>> {
@@ -283,6 +328,87 @@ impl TaskCompletionOnnxRuntime {
             absolute_tolerance: fixture.absolute_tolerance,
         })
     }
+}
+
+pub fn structured_feature_input(
+    projection: &CompactTaskCompletionProjectionV1,
+) -> Result<TensorFixtureV1> {
+    let record = TaskCompletionEvidenceFeatureRecordV1::from_projection(projection)
+        .map_err(|error| invalid(format!("structured evidence is invalid: {error}")))?;
+    let values = record
+        .feature_values
+        .into_iter()
+        .map(|value| {
+            let value = value as f32;
+            value
+                .is_finite()
+                .then_some(value)
+                .ok_or_else(|| invalid("structured evidence cannot be represented as f32"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TensorFixtureV1 {
+        name: TASK_COMPLETION_STRUCTURED_INPUT_NAME.into(),
+        element_type: TensorElementTypeV1::F32,
+        shape: vec![1, values.len()],
+        f32_values: values,
+        i64_values: Vec::new(),
+    })
+}
+
+pub fn validate_release_binding(
+    manifest: &TaskCompletionModelManifestV1,
+    release: &EvaluatorReleaseSpecV1,
+) -> Result<()> {
+    validate_manifest(manifest)?;
+    release
+        .validate()
+        .map_err(|error| invalid(format!("evaluator release is invalid: {error}")))?;
+    if release.task_kind != LearnedTaskKind::TaskCompletion {
+        return Err(invalid("local artifact requires a task-completion release"));
+    }
+    let EvaluationImplementationV1::LocalClassifier {
+        model_artifact_id,
+        tokenizer_artifact_id,
+        feature_schema_id,
+        runtime_version,
+    } = &release.implementation
+    else {
+        return Err(invalid("evaluator release is not a local classifier"));
+    };
+    let tokenizer = manifest
+        .tokenizer_file
+        .as_ref()
+        .ok_or_else(|| invalid("local classifier manifest must name a tokenizer artifact"))?;
+    for (actual, expected, field) in [
+        (
+            model_artifact_id.as_str(),
+            manifest.model_file.sha256.as_str(),
+            "model artifact",
+        ),
+        (
+            tokenizer_artifact_id.as_str(),
+            tokenizer.sha256.as_str(),
+            "tokenizer artifact",
+        ),
+        (
+            feature_schema_id.as_str(),
+            manifest.lineage.feature_set_version.as_str(),
+            "feature schema",
+        ),
+        (
+            runtime_version.as_str(),
+            TASK_COMPLETION_ONNX_RUNTIME_VERSION,
+            "runtime version",
+        ),
+    ] {
+        if actual != expected {
+            return Err(invalid(format!(
+                "evaluator {field} does not match the verified local artifact: expected \
+                 {expected}, got {actual}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn calibrated_decision(
@@ -879,6 +1005,55 @@ mod tests {
         manifest.calibration.temperature = 1.0;
         manifest.decision_output.complete_logit_index = 2;
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn local_release_must_bind_every_verified_artifact_and_schema() {
+        let mut manifest = manifest();
+        manifest.tokenizer_file = Some(ArtifactFileV1 {
+            path: "tokenizer.json".into(),
+            sha256: digest('4'),
+            size_bytes: 10,
+        });
+        let mut release = traceeval_contracts::EvaluatorReleaseSpecV1 {
+            schema_version: traceeval_contracts::EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
+            name: "local task completion".into(),
+            task_kind: traceeval_contracts::LearnedTaskKind::TaskCompletion,
+            target_kind: traceeval_contracts::EvaluationTargetKind::TraceRevision,
+            implementation: traceeval_contracts::EvaluationImplementationV1::LocalClassifier {
+                model_artifact_id: manifest.model_file.sha256.clone(),
+                tokenizer_artifact_id: manifest.tokenizer_file.as_ref().unwrap().sha256.clone(),
+                feature_schema_id: manifest.lineage.feature_set_version.clone(),
+                runtime_version: TASK_COMPLETION_ONNX_RUNTIME_VERSION.into(),
+            },
+            projection_release_id: digest('5'),
+            context_projection_release_id: digest('6'),
+            applicable_taxonomy_release_id: None,
+            applicable_taxonomy_node_ids: Default::default(),
+            input_bounds: traceeval_contracts::EvaluationInputBoundsV1 {
+                max_subjects: 1,
+                max_evidence_items: 64,
+                max_input_bytes: 100_000,
+                max_output_bytes: 10_000,
+            },
+            evidence_schema_version: "traceeval.evidence.v1".into(),
+            abstention_policy: serde_json::json!({"missing_evidence": "abstain"}),
+            code_artifact_hash: digest('7'),
+        };
+
+        validate_release_binding(&manifest, &release).unwrap();
+        if let traceeval_contracts::EvaluationImplementationV1::LocalClassifier {
+            runtime_version,
+            ..
+        } = &mut release.implementation
+        {
+            *runtime_version = "wrong-runtime".into();
+        }
+        let error = validate_release_binding(&manifest, &release)
+            .expect_err("a mismatched runtime must fail release binding")
+            .to_string();
+        assert!(error.contains(TASK_COMPLETION_ONNX_RUNTIME_VERSION));
+        assert!(error.contains("wrong-runtime"));
     }
 
     #[test]
