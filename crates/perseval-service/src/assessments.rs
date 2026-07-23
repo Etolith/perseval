@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use perseval_model_runtime::{TaskCompletionLabelV1, TaskCompletionOnnxRuntime};
+use perseval_model_runtime::{
+    TASK_COMPLETION_ONNX_RUNTIME_VERSION, TaskCompletionLabelV1, TaskCompletionOnnxRuntime,
+};
 use perseval_store::{
     AssessmentCommitV1, AssessmentItemStatusV1, ClaimedAssessmentItemV1,
     TaskCompletionReleaseConfigV1, WorkspaceStore,
@@ -20,6 +22,21 @@ use traces_to_evals::{
 };
 
 use crate::config::AssessmentConfig;
+
+/// Secret-free identity of the exact local model that passed startup
+/// verification. Manifest v1 artifacts are development candidates; a future
+/// certified manifest schema will carry the statistical release evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalTaskCompletionModelV1 {
+    pub model_id: String,
+    pub model_artifact_id: String,
+    pub tokenizer_artifact_id: String,
+    pub feature_schema_id: String,
+    pub projector_version: String,
+    pub runtime_version: String,
+    pub calibration_version: String,
+    pub threshold_complete: f32,
+}
 
 /// Execution seam implemented by task-specific vertical slices. The worker owns
 /// durable scheduling only; evaluator algorithms remain in `traces-to-evals`.
@@ -148,6 +165,29 @@ impl LocalOnnxTaskCompletionRunner {
             projector: CompactTaskCompletionProjector::default(),
         })
     }
+
+    fn model(&self) -> LocalTaskCompletionModelV1 {
+        let runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let manifest = runtime.manifest();
+        LocalTaskCompletionModelV1 {
+            model_id: manifest.model_id.clone(),
+            model_artifact_id: manifest.model_file.sha256.clone(),
+            tokenizer_artifact_id: manifest
+                .tokenizer_file
+                .as_ref()
+                .expect("tokenizer verified while loading local runner")
+                .sha256
+                .clone(),
+            feature_schema_id: manifest.lineage.feature_set_version.clone(),
+            projector_version: manifest.lineage.projector_version.clone(),
+            runtime_version: TASK_COMPLETION_ONNX_RUNTIME_VERSION.into(),
+            calibration_version: manifest.calibration.version.clone(),
+            threshold_complete: manifest.calibration.threshold_complete,
+        }
+    }
 }
 
 impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
@@ -254,6 +294,12 @@ impl ConfiguredTaskCompletionRunner {
                 .transpose()?,
         })
     }
+
+    fn local_model(&self) -> Option<LocalTaskCompletionModelV1> {
+        self.local
+            .as_ref()
+            .map(LocalOnnxTaskCompletionRunner::model)
+    }
 }
 
 impl TaskCompletionEvaluationRunner for ConfiguredTaskCompletionRunner {
@@ -298,10 +344,22 @@ impl TaskCompletionAssessmentExecutor {
         store: Arc<WorkspaceStore>,
         local_artifact_dir: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        Ok(Self {
-            store,
-            runner: Arc::new(ConfiguredTaskCompletionRunner::new(local_artifact_dir)?),
-        })
+        Self::configured_with_model(store, local_artifact_dir).map(|(executor, _)| executor)
+    }
+
+    pub fn configured_with_model(
+        store: Arc<WorkspaceStore>,
+        local_artifact_dir: Option<&Path>,
+    ) -> anyhow::Result<(Self, Option<LocalTaskCompletionModelV1>)> {
+        let runner = ConfiguredTaskCompletionRunner::new(local_artifact_dir)?;
+        let local_model = runner.local_model();
+        Ok((
+            Self {
+                store,
+                runner: Arc::new(runner),
+            },
+            local_model,
+        ))
     }
 
     pub fn with_runner(

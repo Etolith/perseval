@@ -29,10 +29,17 @@ use traces_to_evals::{
     task_completion_judgment_response_schema,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCompletionExecutionRouteV1 {
+    HostedOpenAi,
+    LocalOnnx,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCompletionQualityCheckDraftV1 {
     pub name: String,
     pub review_criteria: String,
+    pub execution_route: TaskCompletionExecutionRouteV1,
     pub requested_model: String,
     pub context_release_id: String,
     pub applicable_taxonomy_node_ids: BTreeSet<String>,
@@ -52,23 +59,40 @@ impl LiveTraceService {
         activated_by: &str,
         authority: ReviewAuthorityV1,
     ) -> Result<String, LiveServiceError> {
-        if draft.name.trim().is_empty()
-            || draft.review_criteria.trim().is_empty()
-            || draft.requested_model.trim().is_empty()
-            || draft.pricing_version.trim().is_empty()
+        if draft.name.trim().is_empty() {
+            return Err(LiveServiceError::InvalidInput(
+                "quality check name is required".into(),
+            ));
+        }
+        if draft.execution_route == TaskCompletionExecutionRouteV1::HostedOpenAi
+            && (draft.review_criteria.trim().is_empty()
+                || draft.requested_model.trim().is_empty()
+                || draft.pricing_version.trim().is_empty())
         {
             return Err(LiveServiceError::InvalidInput(
-                "quality check name, review criteria, model, and pricing version are required"
+                "hosted quality checks require review criteria, a model, and pricing version"
                     .into(),
             ));
         }
-        if draft.estimated_output_tokens_low == 0
-            || draft.estimated_output_tokens_high < draft.estimated_output_tokens_low
+        if draft.execution_route == TaskCompletionExecutionRouteV1::HostedOpenAi
+            && (draft.estimated_output_tokens_low == 0
+                || draft.estimated_output_tokens_high < draft.estimated_output_tokens_low)
         {
             return Err(LiveServiceError::InvalidInput(
                 "estimated output token range is invalid".into(),
             ));
         }
+        let local_model = match draft.execution_route {
+            TaskCompletionExecutionRouteV1::HostedOpenAi => None,
+            TaskCompletionExecutionRouteV1::LocalOnnx => {
+                Some(self.local_task_completion_model().ok_or_else(|| {
+                    LiveServiceError::InvalidInput(
+                        "no verified local task-completion model is configured; choose an artifact directory in Settings and restart Perseval"
+                            .into(),
+                    )
+                })?)
+            }
+        };
         let context = self
             .store
             .agent_context_release(project_id, &draft.context_release_id)?
@@ -77,13 +101,18 @@ impl LiveTraceService {
                     "the selected immutable agent specification is unavailable".into(),
                 )
             })?;
-        let projection_class = match draft.content_policy {
-            TaskCompletionContentPolicyV1::StructuredOnly => {
+        let projection_class = match (draft.execution_route, draft.content_policy) {
+            (_, TaskCompletionContentPolicyV1::StructuredOnly) => {
                 ContextProjectionClassV1::StructuralOnly
             }
-            TaskCompletionContentPolicyV1::PreRedactedSummaries => {
-                ContextProjectionClassV1::HostedPreRedacted
-            }
+            (
+                TaskCompletionExecutionRouteV1::HostedOpenAi,
+                TaskCompletionContentPolicyV1::PreRedactedSummaries,
+            ) => ContextProjectionClassV1::HostedPreRedacted,
+            (
+                TaskCompletionExecutionRouteV1::LocalOnnx,
+                TaskCompletionContentPolicyV1::PreRedactedSummaries,
+            ) => ContextProjectionClassV1::LocalContent,
         };
         let included_field_ids = task_completion_context_field_ids(&context, projection_class);
         let applicable_taxonomy_release_id = if draft.applicable_taxonomy_node_ids.is_empty() {
@@ -112,21 +141,13 @@ impl LiveTraceService {
             max_tool_observations: 256,
             max_summary_bytes: 4_096,
         };
+        let implementation = task_completion_implementation(draft, local_model.as_ref());
         let evaluator = EvaluatorReleaseSpecV1 {
             schema_version: traces_to_evals::EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
             name: draft.name.trim().into(),
             task_kind: LearnedTaskKind::TaskCompletion,
             target_kind: EvaluationTargetKind::TraceRevision,
-            implementation: EvaluationImplementationV1::PromptJudge {
-                provider: "openai".into(),
-                requested_model: draft.requested_model.trim().into(),
-                system_prompt: TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2.into(),
-                rubric: draft.review_criteria.trim().into(),
-                response_schema: task_completion_judgment_response_schema(),
-                decoding_parameters: BTreeMap::new(),
-                parser_version: "task-completion-parser-v1".into(),
-                normalizer_version: "task-completion-normalizer-v1".into(),
-            },
+            implementation,
             projection_release_id: projector
                 .release_id()
                 .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?,
@@ -149,11 +170,36 @@ impl LiveTraceService {
                 "truncated_projection": "abstain",
                 "invalid_provider_output": "abstain"
             }),
-            code_artifact_hash: content_hash("perseval-task-completion-quality-check-v1"),
+            code_artifact_hash: content_hash("perseval-task-completion-quality-check-v2"),
         };
         let evaluator_release_id = evaluator
             .release_id()
             .map_err(|error| LiveServiceError::InvalidInput(error.to_string()))?;
+        let (
+            requested_model,
+            estimated_output_tokens_low,
+            estimated_output_tokens_high,
+            input_cost_micros_per_million_tokens,
+            output_cost_micros_per_million_tokens,
+            pricing_version,
+        ) = match local_model {
+            None => (
+                draft.requested_model.trim().into(),
+                draft.estimated_output_tokens_low,
+                draft.estimated_output_tokens_high,
+                draft.input_cost_micros_per_million_tokens,
+                draft.output_cost_micros_per_million_tokens,
+                draft.pricing_version.trim().into(),
+            ),
+            Some(model) => (
+                model.model_artifact_id,
+                1,
+                1,
+                0,
+                0,
+                "local-on-device-v1".into(),
+            ),
+        };
         let config = TaskCompletionReleaseConfigV1 {
             schema_version: TASK_COMPLETION_RELEASE_CONFIG_SCHEMA_VERSION.into(),
             project_id: project_id.into(),
@@ -161,12 +207,12 @@ impl LiveTraceService {
             context_release_id: draft.context_release_id.clone(),
             context_projection,
             projector,
-            requested_model: draft.requested_model.trim().into(),
-            estimated_output_tokens_low: draft.estimated_output_tokens_low,
-            estimated_output_tokens_high: draft.estimated_output_tokens_high,
-            input_cost_micros_per_million_tokens: draft.input_cost_micros_per_million_tokens,
-            output_cost_micros_per_million_tokens: draft.output_cost_micros_per_million_tokens,
-            pricing_version: draft.pricing_version.trim().into(),
+            requested_model,
+            estimated_output_tokens_low,
+            estimated_output_tokens_high,
+            input_cost_micros_per_million_tokens,
+            output_cost_micros_per_million_tokens,
+            pricing_version,
             activated_by: activated_by.into(),
             activated_at_unix_ms: unix_ms_now(),
         };
@@ -270,7 +316,7 @@ impl LiveTraceService {
             &sources,
             &["non-goal", "out of scope", "prohibited", "must not"],
         );
-        let success_criteria = infer_section_items(
+        let mut success_criteria = infer_section_items(
             &sources,
             &[
                 "success criteria",
@@ -279,6 +325,14 @@ impl LiveTraceService {
                 "requirements",
             ],
         );
+        if success_criteria.is_empty() {
+            success_criteria.push((
+                format!(
+                    "Complete the active user request within {application_name}'s declared task scope and support the outcome with trace evidence"
+                ),
+                "Perseval task-completion safety default".into(),
+            ));
+        }
         let escalation_requirements =
             infer_section_items(&sources, &["escalation", "human handoff", "approval"]);
         let captured_at = chrono::Utc::now().to_rfc3339();
@@ -980,6 +1034,30 @@ impl LiveTraceService {
     }
 }
 
+fn task_completion_implementation(
+    draft: &TaskCompletionQualityCheckDraftV1,
+    local_model: Option<&LocalTaskCompletionModelV1>,
+) -> EvaluationImplementationV1 {
+    match local_model {
+        None => EvaluationImplementationV1::PromptJudge {
+            provider: "openai".into(),
+            requested_model: draft.requested_model.trim().into(),
+            system_prompt: TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2.into(),
+            rubric: draft.review_criteria.trim().into(),
+            response_schema: task_completion_judgment_response_schema(),
+            decoding_parameters: BTreeMap::new(),
+            parser_version: "task-completion-parser-v1".into(),
+            normalizer_version: "task-completion-normalizer-v1".into(),
+        },
+        Some(model) => EvaluationImplementationV1::LocalClassifier {
+            model_artifact_id: model.model_artifact_id.clone(),
+            tokenizer_artifact_id: model.tokenizer_artifact_id.clone(),
+            feature_schema_id: model.feature_schema_id.clone(),
+            runtime_version: model.runtime_version.clone(),
+        },
+    }
+}
+
 fn task_completion_context_field_ids(
     context: &AgentContextReleaseV1,
     projection_class: ContextProjectionClassV1,
@@ -1268,5 +1346,54 @@ fn context_sensitivity_name(value: ContextSensitivityV1) -> &'static str {
         ContextSensitivityV1::HiddenLabel => "hidden_label",
         ContextSensitivityV1::ExpectedAnswer => "expected_answer",
         ContextSensitivityV1::Unclassified => "unclassified",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    #[test]
+    fn local_quality_check_binds_only_the_verified_runtime_identity() {
+        let draft = TaskCompletionQualityCheckDraftV1 {
+            name: "Task completion".into(),
+            review_criteria: String::new(),
+            execution_route: TaskCompletionExecutionRouteV1::LocalOnnx,
+            requested_model: "untrusted-ui-value".into(),
+            context_release_id: digest('1'),
+            applicable_taxonomy_node_ids: BTreeSet::new(),
+            content_policy: TaskCompletionContentPolicyV1::PreRedactedSummaries,
+            estimated_output_tokens_low: 96,
+            estimated_output_tokens_high: 384,
+            input_cost_micros_per_million_tokens: 1,
+            output_cost_micros_per_million_tokens: 1,
+            pricing_version: "untrusted-ui-value".into(),
+        };
+        let model = LocalTaskCompletionModelV1 {
+            model_id: "perseval/task-completion@candidate".into(),
+            model_artifact_id: digest('2'),
+            tokenizer_artifact_id: digest('3'),
+            feature_schema_id: "perseval.task_completion_structured_evidence.v2".into(),
+            projector_version: "perseval.compact-task-completion-projector.v3".into(),
+            runtime_version: "perseval.task_completion_onnx.v1".into(),
+            calibration_version: "candidate-calibration-v1".into(),
+            threshold_complete: 0.53,
+        };
+
+        let implementation = task_completion_implementation(&draft, Some(&model));
+
+        assert_eq!(
+            implementation,
+            EvaluationImplementationV1::LocalClassifier {
+                model_artifact_id: model.model_artifact_id,
+                tokenizer_artifact_id: model.tokenizer_artifact_id,
+                feature_schema_id: model.feature_schema_id,
+                runtime_version: model.runtime_version,
+            }
+        );
     }
 }

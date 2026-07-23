@@ -20,9 +20,10 @@ changes.
 ## Run a quality check
 
 1. Open **Evals**, then select **Quality checks**.
-2. Publish the Task Completion quality check. Its evaluator release, criteria,
-   mapping, provider model, projection policy, output schema, and abstention
-   behavior become immutable.
+2. Choose **On this Mac** for a verified local model or **OpenAI** for
+   the hosted judge, then publish the Task Completion quality check. Its
+   evaluator release, execution route, model identity, mapping, projection
+   policy, output schema, and abstention behavior become immutable.
 3. Preview a backfill before starting it. Review the exact target count,
    exclusions, estimated work, and outbound-content policy.
 4. Start the job from that preview. The job keeps attempted, completed, failed,
@@ -94,6 +95,26 @@ cargo run -p perseval-model-runtime --bin perseval-model -- verify ARTIFACT_DIRE
 cargo run -p perseval-model-runtime --bin perseval-model -- parity ARTIFACT_DIRECTORY
 ```
 
+To exercise an approved development candidate through the application:
+
+1. Open **Settings → AI features** and choose the model folder.
+2. Turn on **Run reviews**, save the settings, and restart Perseval.
+3. Confirm that **Model status** is verified. The model details underneath are
+   useful when comparing or reporting results.
+4. Open **Evals → Quality checks**, choose **On this Mac**, and publish the
+   quality check.
+
+Local quality checks bind to the exact model, tokenizer, feature-schema, and
+runtime hashes verified at startup. Editable provider fields and custom hosted
+rubrics are intentionally unavailable on this route. If verification fails,
+publishing fails closed and tells the user to repair the artifact setting;
+Perseval never falls back to OpenAI. Projected evidence and inference remain on
+the Mac, and provider cost is recorded as zero.
+
+The UI labels non-release artifacts as development candidates. Runtime
+compatibility and parity make a candidate executable, not statistically
+certified; release approval still requires the frozen quality gates below.
+
 Sealed compact projections can be converted to label-free, revision-bound
 training records through the reusable `traces-to-evals` contract:
 
@@ -110,8 +131,9 @@ is necessary but does not establish model quality.
 ## Current scope
 
 This milestone ships Task Completion, evidence inspection, human review,
-calibration, and the verified local ONNX runtime boundary. It does not ship an
-approved local model, hallucination or the other evaluator families,
+calibration, and the verified local ONNX runtime boundary. A manually selected
+development artifact can now run end to end, but no local model is bundled or
+approved by default. It does not ship hallucination or the other evaluator families,
 learned failure discovery, active learning, regression test-set creation,
 release experiments, live learned evaluation, or MCP execution of quality
 checks. The current Arize comparison is a frozen engineering baseline; it does
