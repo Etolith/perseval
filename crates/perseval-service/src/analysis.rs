@@ -54,7 +54,7 @@ enum CohortJob {
 }
 
 pub(crate) struct AnalysisWorker {
-    pub(crate) thread: thread::JoinHandle<()>,
+    pub(crate) threads: Vec<thread::JoinHandle<()>>,
     pub(crate) cohort_control: Option<CohortControlHandle>,
     pub(crate) openai_health: OpenAiHealthHandle,
 }
@@ -273,6 +273,12 @@ pub(crate) fn spawn_analysis_worker(
             || config.openai.cluster_labels_enabled
             || config.openai.semantic_judge_enabled);
     let openai_configured = openai_key_available();
+    if openai_enabled && !openai_configured {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "OpenAI analysis is enabled but OPENAI_API_KEY is unavailable",
+        ));
+    }
     let openai_health = OpenAiHealthHandle::new(openai_enabled, openai_configured);
     let cohort_available = config.feature_similarity_enabled
         && (!config.openai.embeddings_enabled || openai_configured);
@@ -289,78 +295,86 @@ pub(crate) fn spawn_analysis_worker(
     } else {
         (None, None)
     };
+    let normalizer = OpenInferenceBehaviorNormalizer::default();
+    let detectors = DeterministicDetectorSet::default();
+    let mut detector_versions = detectors.detector_versions();
+    if config.openai.enabled && config.openai.semantic_judge_enabled {
+        detector_versions.insert(
+            format!(
+                "semantic_behavior_judge/openai/{}",
+                config.openai.chat_model
+            ),
+            OPENAI_SEMANTIC_BEHAVIOR_EVALUATOR_VERSION.into(),
+        );
+    }
+    let expected = AnalysisDefinitionV1 {
+        schema_version: ANALYSIS_DEFINITION_SCHEMA_VERSION.into(),
+        input_schema_version: BEHAVIOR_INPUT_SCHEMA_VERSION.into(),
+        projection_version: SAFE_BEHAVIOR_PROJECTION_VERSION.into(),
+        adapter_id: normalizer.adapter().adapter_id.clone(),
+        adapter_version: normalizer.adapter().adapter_version.clone(),
+        detector_profile_id: detectors.profile().profile_id.clone(),
+        detector_profile_version: detectors.profile().profile_version.clone(),
+        detector_versions,
+        grouping_version: DEFAULT_ANALYSIS_GROUPING_VERSION.into(),
+        risk_model_version: DEFAULT_ANALYSIS_RISK_MODEL_VERSION.into(),
+    };
+    let semantic_runtime =
+        (config.openai.enabled && config.openai.semantic_judge_enabled && openai_configured)
+            .then(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            })
+            .transpose()?;
+    let cohort_runtime = (cohort_available
+        && config.openai.enabled
+        && (config.openai.embeddings_enabled || config.openai.cluster_labels_enabled))
+        .then(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        })
+        .transpose()?;
+    let definition_id = analysis_definition_id(&expected);
     let worker_cohort_control = cohort_control.clone();
     let worker_openai_health = openai_health.clone();
+    let cohort_thread = if let (Some(control), Some(receiver)) =
+        (worker_cohort_control.as_ref(), cohort_receiver)
+    {
+        let cohort_store = Arc::clone(&store);
+        let cohort_writer = writer.clone();
+        let cohort_config = config.clone();
+        let cohort_shutdown = Arc::clone(&shutting_down);
+        let cohort_rebuild_all = Arc::clone(&control.rebuild_all);
+        let cohort_health = Arc::clone(&control.health);
+        let cohort_openai_health = worker_openai_health.clone();
+        Some(
+            thread::Builder::new()
+                .name("perseval-feature-cohort".into())
+                .spawn(move || {
+                    run_cohort_worker(CohortWorkerContext {
+                        store: cohort_store,
+                        writer: cohort_writer,
+                        config: cohort_config,
+                        analysis_definition_id: definition_id,
+                        shutting_down: cohort_shutdown,
+                        receiver,
+                        rebuild_all: cohort_rebuild_all,
+                        health: cohort_health,
+                        openai_health: cohort_openai_health,
+                        openai_runtime: cohort_runtime,
+                    });
+                })?,
+        )
+    } else {
+        None
+    };
+    let analysis_shutdown = Arc::clone(&shutting_down);
     let thread = thread::Builder::new()
         .name("perseval-finalized-analysis".into())
         .spawn(move || {
-            let normalizer = OpenInferenceBehaviorNormalizer::default();
-            let detectors = DeterministicDetectorSet::default();
-            let mut detector_versions = detectors.detector_versions();
-            if config.openai.enabled && config.openai.semantic_judge_enabled {
-                detector_versions.insert(
-                    format!(
-                        "semantic_behavior_judge/openai/{}",
-                        config.openai.chat_model
-                    ),
-                    OPENAI_SEMANTIC_BEHAVIOR_EVALUATOR_VERSION.into(),
-                );
-            }
-            let expected = AnalysisDefinitionV1 {
-                schema_version: ANALYSIS_DEFINITION_SCHEMA_VERSION.into(),
-                input_schema_version: BEHAVIOR_INPUT_SCHEMA_VERSION.into(),
-                projection_version: SAFE_BEHAVIOR_PROJECTION_VERSION.into(),
-                adapter_id: normalizer.adapter().adapter_id.clone(),
-                adapter_version: normalizer.adapter().adapter_version.clone(),
-                detector_profile_id: detectors.profile().profile_id.clone(),
-                detector_profile_version: detectors.profile().profile_version.clone(),
-                detector_versions,
-                grouping_version: DEFAULT_ANALYSIS_GROUPING_VERSION.into(),
-                risk_model_version: DEFAULT_ANALYSIS_RISK_MODEL_VERSION.into(),
-            };
-            let semantic_runtime = (config.openai.enabled
-                && config.openai.semantic_judge_enabled
-                && openai_configured)
-                .then(|| {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                })
-                .transpose()
-                .ok()
-                .flatten();
-            let definition_id = analysis_definition_id(&expected);
-            let cohort_thread = if let (Some(control), Some(receiver)) =
-                (worker_cohort_control.as_ref(), cohort_receiver)
-            {
-                let cohort_store = Arc::clone(&store);
-                let cohort_writer = writer.clone();
-                let cohort_config = config.clone();
-                let cohort_shutdown = Arc::clone(&shutting_down);
-                let cohort_definition_id = definition_id.clone();
-                let cohort_rebuild_all = Arc::clone(&control.rebuild_all);
-                let cohort_health = Arc::clone(&control.health);
-                let cohort_openai_health = worker_openai_health.clone();
-                thread::Builder::new()
-                    .name("perseval-feature-cohort".into())
-                    .spawn(move || {
-                        run_cohort_worker(CohortWorkerContext {
-                            store: cohort_store,
-                            writer: cohort_writer,
-                            config: cohort_config,
-                            analysis_definition_id: cohort_definition_id,
-                            shutting_down: cohort_shutdown,
-                            receiver,
-                            rebuild_all: cohort_rebuild_all,
-                            health: cohort_health,
-                            openai_health: cohort_openai_health,
-                        });
-                    })
-                    .ok()
-            } else {
-                None
-            };
-            while !shutting_down.load(Ordering::Acquire) {
+            while !analysis_shutdown.load(Ordering::Acquire) {
                 match writer.enqueue_stale_analyses(expected.clone()) {
                     Ok(()) => break,
                     Err(_) => thread::sleep(Duration::from_millis(100)),
@@ -369,7 +383,7 @@ pub(crate) fn spawn_analysis_worker(
             if let Some(control) = &worker_cohort_control {
                 let _ = control.request_rebuild(None);
             }
-            while !shutting_down.load(Ordering::Acquire) {
+            while !analysis_shutdown.load(Ordering::Acquire) {
                 let requests = match store.pending_analysis_requests(8) {
                     Ok(requests) => requests,
                     Err(_) => {
@@ -384,7 +398,7 @@ pub(crate) fn spawn_analysis_worker(
                 for request in requests {
                     let job = TraceAnalysisJob { request };
                     let request = job.request;
-                    if shutting_down.load(Ordering::Acquire) {
+                    if analysis_shutdown.load(Ordering::Acquire) {
                         break;
                     }
                     match writer.mark_analysis_started(request.clone()) {
@@ -516,12 +530,21 @@ pub(crate) fn spawn_analysis_worker(
                     }
                 }
             }
+        });
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            shutting_down.store(true, Ordering::Release);
             if let Some(thread) = cohort_thread {
                 let _ = thread.join();
             }
-        })?;
+            return Err(error);
+        }
+    };
+    let mut threads = vec![thread];
+    threads.extend(cohort_thread);
     Ok(AnalysisWorker {
-        thread,
+        threads,
         cohort_control,
         openai_health,
     })
@@ -537,6 +560,7 @@ struct CohortWorkerContext {
     rebuild_all: Arc<AtomicBool>,
     health: Arc<CohortHealthState>,
     openai_health: OpenAiHealthHandle,
+    openai_runtime: Option<tokio::runtime::Runtime>,
 }
 
 fn run_cohort_worker(context: CohortWorkerContext) {
@@ -550,17 +574,8 @@ fn run_cohort_worker(context: CohortWorkerContext) {
         rebuild_all,
         health,
         openai_health,
+        openai_runtime,
     } = context;
-    let openai_runtime = (config.openai.enabled
-        && (config.openai.embeddings_enabled || config.openai.cluster_labels_enabled))
-        .then(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-        })
-        .transpose()
-        .ok()
-        .flatten();
     let debounce = Duration::from_millis(config.cohort_rebuild_debounce_ms);
     let mut feature_cache = CohortFeatureCache::new(config.cohort_feature_cache_entries);
     let mut dirty_projects = BTreeSet::new();
