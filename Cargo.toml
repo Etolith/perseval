@@ -47,7 +47,7 @@ tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread
 toml = "1.1"
 tower = "0.5"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-traceeval-contracts = { git = "https://github.com/Etolith/traces-to-evals", rev = "f84cfdc9926e1f309694dcfd131f47a922ccbf5a" }
-traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "f84cfdc9926e1f309694dcfd131f47a922ccbf5a" }
+traceeval-contracts = { git = "https://github.com/Etolith/traces-to-evals", rev = "e36243a857ab58c405fe494fdaf9716ca15d890a" }
+traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "e36243a857ab58c405fe494fdaf9716ca15d890a" }
 unicode-segmentation = "1.12"
 zstd = "0.13"

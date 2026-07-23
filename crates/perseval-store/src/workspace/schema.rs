@@ -43,6 +43,10 @@ const CONTROL_MIGRATIONS: &[ControlMigration] = &[
         version: 22,
         apply: apply_control_v22_migration_metadata,
     },
+    ControlMigration {
+        version: 23,
+        apply: apply_control_v23_active_failure_projection,
+    },
 ];
 
 fn apply_control_v21_baseline(connection: &SqliteConnection) -> Result<(), StoreError> {
@@ -530,68 +534,7 @@ fn apply_control_v21_baseline(connection: &SqliteConnection) -> Result<(), Store
         "CREATE INDEX IF NOT EXISTS idx_semantic_cluster_models_scope_active
             ON semantic_cluster_models(project_id, scope_id, active, created_at_unix_ms DESC);",
     )?;
-    ensure_control_column(
-        connection,
-        "active_failure_findings",
-        "projection_schema_version",
-        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v3'",
-    )?;
-    ensure_control_column(
-        connection,
-        "active_failure_group_memberships",
-        "projection_schema_version",
-        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v3'",
-    )?;
-    for (column, declaration) in [
-        ("project_id", "TEXT NOT NULL DEFAULT 'unassigned'"),
-        ("service_name", "TEXT"),
-        ("environment", "TEXT"),
-        ("build_id", "TEXT"),
-        ("session_id", "TEXT"),
-        ("run_title", "TEXT NOT NULL DEFAULT ''"),
-        ("run_started_at_unix_nano", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        ensure_control_column(connection, "active_failure_findings", column, declaration)?;
-    }
-    for (column, declaration) in [
-        ("service_name", "TEXT"),
-        ("environment", "TEXT"),
-        ("build_id", "TEXT"),
-        ("session_id", "TEXT"),
-        ("run_title", "TEXT NOT NULL DEFAULT ''"),
-        ("run_started_at_unix_nano", "INTEGER NOT NULL DEFAULT 0"),
-        ("subject", "TEXT"),
-        ("operation", "TEXT"),
-        ("presentation_json", "TEXT"),
-        ("telemetry_gaps_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ("telemetry_gap_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("confirmed_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("dismissed_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("needs_context_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("unreviewed_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("stale_disposition_count", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        ensure_control_column(
-            connection,
-            "active_failure_group_memberships",
-            column,
-            declaration,
-        )?;
-    }
-    connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_active_failure_group_memberships_scope
-            ON active_failure_group_memberships(project_id, service_name, environment,
-                                                 build_id, session_id,
-                                                 run_started_at_unix_nano, group_id);
-         CREATE INDEX IF NOT EXISTS idx_active_failure_findings_group_project
-            ON active_failure_findings(project_id, group_id, finding_id);",
-    )?;
-    ensure_control_column(
-        connection,
-        "active_failure_projection_state",
-        "projection_schema_version",
-        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v2'",
-    )?;
+    ensure_active_failure_projection_v3(connection)?;
     ensure_control_column(
         connection,
         "analysis_runs",
@@ -1234,6 +1177,141 @@ fn apply_control_v22_migration_metadata(connection: &SqliteConnection) -> Result
                 applied_at_unix_ms = ?1
           WHERE version = 22",
         [now_unix_ms()],
+    )?;
+    Ok(())
+}
+
+fn apply_control_v23_active_failure_projection(
+    connection: &SqliteConnection,
+) -> Result<(), StoreError> {
+    ensure_active_failure_projection_v3(connection)?;
+    connection.execute(
+        "UPDATE schema_migrations
+            SET name = 'active-failure-projection-v3',
+                applied_at_unix_ms = ?1
+          WHERE version = 23",
+        [now_unix_ms()],
+    )?;
+    Ok(())
+}
+
+fn ensure_active_failure_projection_v3(connection: &SqliteConnection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS active_failure_group_detectors(
+            logical_trace_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            detector_id TEXT NOT NULL,
+            PRIMARY KEY(logical_trace_id, group_id, detector_id)
+         );
+         CREATE TABLE IF NOT EXISTS active_failure_evidence_refs(
+            finding_id TEXT NOT NULL,
+            evidence_index INTEGER NOT NULL,
+            analysis_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            evidence_kind TEXT NOT NULL,
+            evidence_identity TEXT NOT NULL,
+            span_id TEXT,
+            role TEXT NOT NULL,
+            explanation TEXT NOT NULL,
+            PRIMARY KEY(finding_id, evidence_index)
+         );
+         CREATE TABLE IF NOT EXISTS active_failure_diagnostics(
+            finding_id TEXT NOT NULL,
+            diagnostic_index INTEGER NOT NULL,
+            analysis_id TEXT NOT NULL,
+            logical_trace_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            diagnostic TEXT NOT NULL,
+            PRIMARY KEY(finding_id, diagnostic_index)
+         );
+         CREATE TABLE IF NOT EXISTS active_failure_projection_state(
+            logical_trace_id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            analysis_id TEXT NOT NULL,
+            projection_schema_version TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v2',
+            projected_at_unix_ms INTEGER NOT NULL
+         );",
+    )?;
+    ensure_control_column(
+        connection,
+        "active_failure_findings",
+        "projection_schema_version",
+        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v3'",
+    )?;
+    ensure_control_column(
+        connection,
+        "active_failure_group_memberships",
+        "projection_schema_version",
+        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v3'",
+    )?;
+    for (column, declaration) in [
+        ("project_id", "TEXT NOT NULL DEFAULT 'unassigned'"),
+        ("service_name", "TEXT"),
+        ("environment", "TEXT"),
+        ("build_id", "TEXT"),
+        ("session_id", "TEXT"),
+        ("run_title", "TEXT NOT NULL DEFAULT ''"),
+        ("run_started_at_unix_nano", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        ensure_control_column(connection, "active_failure_findings", column, declaration)?;
+    }
+    for (column, declaration) in [
+        ("service_name", "TEXT"),
+        ("environment", "TEXT"),
+        ("build_id", "TEXT"),
+        ("session_id", "TEXT"),
+        ("run_title", "TEXT NOT NULL DEFAULT ''"),
+        ("run_started_at_unix_nano", "INTEGER NOT NULL DEFAULT 0"),
+        ("subject", "TEXT"),
+        ("operation", "TEXT"),
+        ("presentation_json", "TEXT"),
+        ("telemetry_gaps_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("telemetry_gap_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("confirmed_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("dismissed_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("needs_context_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("unreviewed_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("stale_disposition_count", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        ensure_control_column(
+            connection,
+            "active_failure_group_memberships",
+            column,
+            declaration,
+        )?;
+    }
+    ensure_control_column(
+        connection,
+        "active_failure_projection_state",
+        "projection_schema_version",
+        "TEXT NOT NULL DEFAULT 'perseval.active_failure_projection.v2'",
+    )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_active_failure_findings_signature
+            ON active_failure_findings(failure_signature, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_findings_filter
+            ON active_failure_findings(detector_id, severity, recovery, created_at);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_findings_trace
+            ON active_failure_findings(logical_trace_id, revision);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_findings_group_project
+            ON active_failure_findings(project_id, group_id, finding_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_group_memberships_group
+            ON active_failure_group_memberships(project_id, group_id, logical_trace_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_group_memberships_rank
+            ON active_failure_group_memberships(project_id, severity, unrecovered_count,
+                                                 occurrence_count, last_seen_at);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_group_memberships_scope
+            ON active_failure_group_memberships(project_id, service_name, environment,
+                                                 build_id, session_id,
+                                                 run_started_at_unix_nano, group_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_group_detectors_group
+            ON active_failure_group_detectors(project_id, group_id, detector_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_evidence_identity
+            ON active_failure_evidence_refs(finding_id, evidence_index, span_id);
+         CREATE INDEX IF NOT EXISTS idx_active_failure_diagnostics_finding
+            ON active_failure_diagnostics(finding_id, diagnostic_index);",
     )?;
     Ok(())
 }

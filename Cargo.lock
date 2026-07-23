@@ -7865,7 +7865,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "traceeval-contracts"
 version = "0.1.0"
-source = "git+https://github.com/Etolith/traces-to-evals?rev=f84cfdc9926e1f309694dcfd131f47a922ccbf5a#f84cfdc9926e1f309694dcfd131f47a922ccbf5a"
+source = "git+https://github.com/Etolith/traces-to-evals?rev=e36243a857ab58c405fe494fdaf9716ca15d890a#e36243a857ab58c405fe494fdaf9716ca15d890a"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -7878,7 +7878,7 @@ dependencies = [
 [[package]]
 name = "traces-to-evals"
 version = "0.1.0"
-source = "git+https://github.com/Etolith/traces-to-evals?rev=f84cfdc9926e1f309694dcfd131f47a922ccbf5a#f84cfdc9926e1f309694dcfd131f47a922ccbf5a"
+source = "git+https://github.com/Etolith/traces-to-evals?rev=e36243a857ab58c405fe494fdaf9716ca15d890a#e36243a857ab58c405fe494fdaf9716ca15d890a"
 dependencies = [
  "anyhow",
  "async-trait",
