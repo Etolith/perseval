@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -747,6 +747,13 @@ impl SettingsScreen {
                 return;
             }
         };
+        if let Err(error) =
+            validate_local_model_folder(candidate.assessments.local_model_artifact_dir.as_deref())
+        {
+            self.save_notice = Some((error, Theme::RED));
+            cx.notify();
+            return;
+        }
         self.saving = true;
         self.save_notice = None;
         let task = cx.background_spawn({
@@ -2089,6 +2096,48 @@ fn required_text(
     }
 }
 
+fn validate_local_model_folder(artifact_dir: Option<&Path>) -> Result<(), String> {
+    let Some(artifact_dir) = artifact_dir else {
+        return Ok(());
+    };
+    if !artifact_dir.is_dir() {
+        return Err("Model folder does not exist or is not a directory.".into());
+    }
+
+    let manifest_path = artifact_dir.join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|_| "Model folder must contain a readable manifest.json.".to_string())?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| "Model manifest is not valid JSON.".to_string())?;
+    for (label, pointer) in [
+        ("model", "/model_file/path"),
+        ("tokenizer", "/tokenizer_file/path"),
+    ] {
+        let relative = manifest
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| format!("Model manifest does not name a {label} file."))?;
+        let relative = Path::new(relative);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!("Model manifest has an unsafe {label} file path."));
+        }
+        if !artifact_dir.join(relative).is_file() {
+            return Err(format!(
+                "Model folder is missing the {label} file named by manifest.json."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_size(
     input: &Entity<TextInput>,
     label: &str,
@@ -2389,6 +2438,27 @@ mod tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1_536), "1.5 KiB");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn local_model_folder_must_contain_manifest_bound_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(validate_local_model_folder(Some(directory.path())).is_err());
+
+        std::fs::write(
+            directory.path().join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "model_file": {"path": "model.onnx"},
+                "tokenizer_file": {"path": "tokenizer.json"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("model.onnx"), []).unwrap();
+        assert!(validate_local_model_folder(Some(directory.path())).is_err());
+
+        std::fs::write(directory.path().join("tokenizer.json"), []).unwrap();
+        assert!(validate_local_model_folder(Some(directory.path())).is_ok());
     }
 
     #[test]

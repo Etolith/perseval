@@ -641,7 +641,7 @@ impl QualityCheckStudio {
                 } => self
                     .local_model
                     .as_ref()
-                    .filter(|model| model.model_artifact_id == *model_artifact_id)
+                    .filter(|model| model.model_artifact_id.as_str() == model_artifact_id.as_str())
                     .map_or_else(
                         || format!("Local {}", short_id(model_artifact_id)),
                         |model| format!("Local {}", model.model_id),
