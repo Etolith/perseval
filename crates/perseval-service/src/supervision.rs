@@ -73,20 +73,32 @@ impl WorkerSupervisor {
     }
 
     pub(crate) fn unexpected_exits(&self) -> Vec<String> {
-        let mut failures = self
-            .failures
-            .lock()
-            .expect("worker failure lock poisoned")
-            .clone();
-        failures.extend(
-            self.workers
+        let finished = {
+            let mut workers = self
+                .workers
                 .lock()
-                .expect("worker supervisor lock poisoned")
-                .iter()
-                .filter(|worker| worker.handle.is_finished())
-                .map(|worker| format!("{} exited", worker.name)),
-        );
-        failures
+                .expect("worker supervisor lock poisoned");
+            let mut finished = Vec::new();
+            let mut retained = Vec::new();
+            for worker in workers.drain(..) {
+                if worker.handle.is_finished() {
+                    finished.push(worker);
+                } else {
+                    retained.push(worker);
+                }
+            }
+            *workers = retained;
+            finished
+        };
+        let mut failures = self.failures.lock().expect("worker failure lock poisoned");
+        failures.extend(finished.into_iter().map(|worker| {
+            if worker.handle.join().is_err() {
+                format!("{} panicked", worker.name)
+            } else {
+                format!("{} exited", worker.name)
+            }
+        }));
+        failures.clone()
     }
 }
 
@@ -109,6 +121,27 @@ mod tests {
         assert_eq!(
             supervisor.unexpected_exits(),
             vec!["analysis (perseval-analysis-7) panicked"]
+        );
+    }
+
+    #[test]
+    fn unexpected_panics_are_classified_once_and_removed_from_active_workers() {
+        let supervisor = WorkerSupervisor::default();
+        let thread = thread::Builder::new()
+            .name("perseval-analysis-8".into())
+            .spawn(|| panic!("test worker panic"))
+            .unwrap();
+        while !thread.is_finished() {
+            thread::yield_now();
+        }
+        supervisor.add("analysis", WorkerGroup::Background, thread);
+
+        let expected = vec!["analysis (perseval-analysis-8) panicked"];
+        assert_eq!(supervisor.unexpected_exits(), expected);
+        assert_eq!(
+            supervisor.unexpected_exits(),
+            expected,
+            "finished workers must not be reported more than once"
         );
     }
 }
