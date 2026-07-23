@@ -1037,7 +1037,7 @@ fn refresh_feature_similarity_cohorts(
 
 fn analysis_definition_id(definition: &AnalysisDefinitionV1) -> String {
     let encoded = serde_json::to_vec(definition).expect("analysis definition is serializable");
-    format!("analysis-{:x}", Sha256::digest(encoded))
+    format!("analysis-{}", hex::encode(Sha256::digest(encoded)))
 }
 
 fn feature_similarity_model_id(
@@ -1066,11 +1066,11 @@ fn feature_similarity_model_id(
         digest.update(hash.as_bytes());
         digest.update([b'\n']);
     }
-    format!("feature-similarity-{:x}", digest.finalize())
+    format!("feature-similarity-{}", hex::encode(digest.finalize()))
 }
 
 fn feature_similarity_project_name(project_id: &str) -> ProjectName {
-    let digest = format!("{:x}", Sha256::digest(project_id.as_bytes()));
+    let digest = hex::encode(Sha256::digest(project_id.as_bytes()));
     ProjectName::new(format!("perseval-{}", &digest[..16]))
         .expect("hashed project namespace is always valid")
 }
@@ -1280,7 +1280,7 @@ fn cohort_feature_cache_key(
     }
     digest.update([0]);
     digest.update(dimensions.to_le_bytes());
-    format!("cohort-feature-{:x}", digest.finalize())
+    format!("cohort-feature-{}", hex::encode(digest.finalize()))
 }
 
 fn elapsed_nanos(started: Instant) -> u64 {

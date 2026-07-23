@@ -5332,6 +5332,7 @@ dependencies = [
 name = "perseval-model-runtime"
 version = "0.1.2"
 dependencies = [
+ "hex",
  "ort",
  "serde",
  "serde_json",

@@ -321,7 +321,7 @@ fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 fn external_trace_id(benchmark_trace_id: &str) -> String {

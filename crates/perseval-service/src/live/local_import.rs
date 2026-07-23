@@ -88,10 +88,10 @@ impl LiveTraceService {
         submission.batch.source_id.clone_from(&file_source_id);
         for span in &mut submission.batch.spans {
             span.source_id.clone_from(&file_source_id);
-            span.logical_trace_id = format!(
-                "{:x}",
-                Sha256::digest(format!("{file_source_id}:{}", span.external_trace_id))
-            );
+            span.logical_trace_id = hex::encode(Sha256::digest(format!(
+                "{file_source_id}:{}",
+                span.external_trace_id
+            )));
             span.resource.insert(
                 "perseval.project.id".into(),
                 serde_json::Value::String(project_id.into()),
