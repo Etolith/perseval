@@ -25,6 +25,7 @@ use crate::analyzer::{CohortControlHandle, spawn_analysis_worker};
 use crate::assessments::{TaskCompletionAssessmentExecutor, spawn_assessment_worker};
 use crate::config::PersevalConfigV1;
 use crate::jobs::spawn_candidate_job_worker;
+use crate::supervision::{WorkerGroup, WorkerSupervisor};
 use crate::topology::spawn_topology_worker;
 use traces_to_evals::{ClusterAssignment, ClusterModel, TraceAlignmentOptions, TraceComparison};
 
@@ -540,14 +541,10 @@ pub struct LiveTraceService {
     config: PersevalConfigV1,
     ingest: LiveIngestHandle,
     hub: Arc<DeltaHub>,
-    writer_thread: Mutex<Option<thread::JoinHandle<()>>>,
-    analysis_thread: Mutex<Option<thread::JoinHandle<()>>>,
-    assessment_thread: Mutex<Option<thread::JoinHandle<()>>>,
+    workers: WorkerSupervisor,
     cohort_control: Option<CohortControlHandle>,
     openai_health: crate::analyzer::OpenAiHealthHandle,
-    topology_thread: Mutex<Option<thread::JoinHandle<()>>>,
     analysis_shutdown: Arc<AtomicBool>,
-    candidate_job_thread: Mutex<Option<thread::JoinHandle<()>>>,
     candidate_job_shutdown: Arc<AtomicBool>,
 }
 
@@ -555,6 +552,14 @@ impl LiveTraceService {
     pub fn start(config: PersevalConfigV1) -> Result<Arc<Self>, LiveServiceError> {
         let layout = WorkspaceStoreLayout::new(&config.workspace_dir);
         let store = Arc::new(WorkspaceStore::open(&layout, &config.workspace_id)?);
+        // Validate configured local artifacts and construct provider runtimes
+        // before any background thread is started. Startup is all-or-nothing
+        // for learned assessment dependencies.
+        let assessment_executor = TaskCompletionAssessmentExecutor::configured(
+            store.clone(),
+            config.assessments.local_model_artifact_dir.as_deref(),
+        )
+        .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         let (sender, receiver) = mpsc::sync_channel(config.stream.queue_batches);
         let hub = Arc::new(DeltaHub::default());
         let (accepted_spans, rejected_spans) = store.source_totals(&config.otlp.source_id)?;
@@ -616,8 +621,6 @@ impl LiveTraceService {
             analysis_shutdown.clone(),
         )
         .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
-        let assessment_executor = TaskCompletionAssessmentExecutor::openai(store.clone())
-            .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         let assessment_worker = spawn_assessment_worker(
             store.clone(),
             config.assessments.clone(),
@@ -625,19 +628,31 @@ impl LiveTraceService {
             analysis_shutdown.clone(),
         )
         .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
+        let workers = WorkerSupervisor::default();
+        workers.add(
+            "candidate jobs",
+            WorkerGroup::Background,
+            candidate_worker.thread,
+        );
+        for thread in analysis_worker.threads {
+            workers.add("analysis", WorkerGroup::Background, thread);
+        }
+        workers.add(
+            "assessments",
+            WorkerGroup::Background,
+            assessment_worker.thread,
+        );
+        workers.add("topology", WorkerGroup::Background, topology_thread);
+        workers.add("workspace writer", WorkerGroup::Writer, writer_thread);
         Ok(Arc::new(Self {
             store,
             config,
             ingest,
             hub,
-            writer_thread: Mutex::new(Some(writer_thread)),
-            analysis_thread: Mutex::new(Some(analysis_worker.thread)),
-            assessment_thread: Mutex::new(Some(assessment_worker.thread)),
+            workers,
             cohort_control: analysis_worker.cohort_control,
             openai_health: analysis_worker.openai_health,
-            topology_thread: Mutex::new(Some(topology_thread)),
             analysis_shutdown,
-            candidate_job_thread: Mutex::new(Some(candidate_worker.thread)),
             candidate_job_shutdown: candidate_worker.shutdown,
         }))
     }
@@ -947,38 +962,7 @@ impl LiveTraceService {
         }
         self.analysis_shutdown.store(true, Ordering::Release);
         self.candidate_job_shutdown.store(true, Ordering::Release);
-        if let Some(thread) = self
-            .candidate_job_thread
-            .lock()
-            .expect("candidate job thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
-        }
-        if let Some(thread) = self
-            .analysis_thread
-            .lock()
-            .expect("analysis thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
-        }
-        if let Some(thread) = self
-            .assessment_thread
-            .lock()
-            .expect("assessment thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
-        }
-        if let Some(thread) = self
-            .topology_thread
-            .lock()
-            .expect("topology thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
-        }
+        self.workers.join_group(WorkerGroup::Background);
         let (sender, receiver) = mpsc::channel();
         let _ = self
             .ingest
@@ -988,14 +972,11 @@ impl LiveTraceService {
         let _ = receiver.recv_timeout(Duration::from_millis(
             self.config.lifecycle.shutdown_drain_ms,
         ));
-        if let Some(thread) = self
-            .writer_thread
-            .lock()
-            .expect("writer thread lock poisoned")
-            .take()
-        {
-            let _ = thread.join();
-        }
+        self.workers.join_group(WorkerGroup::Writer);
+    }
+
+    pub fn worker_failures(&self) -> Vec<String> {
+        self.workers.unexpected_exits()
     }
 }
 

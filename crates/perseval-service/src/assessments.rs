@@ -1,18 +1,22 @@
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use perseval_model_runtime::{TaskCompletionLabelV1, TaskCompletionOnnxRuntime};
 use perseval_store::{
     AssessmentCommitV1, AssessmentItemStatusV1, ClaimedAssessmentItemV1,
     TaskCompletionReleaseConfigV1, WorkspaceStore,
 };
+use traces_to_evals::learned::{CompactTaskCompletionProjector, TaskCompletionTokenCounter};
 use traces_to_evals::{
-    EvaluationEvidenceCatalogV1, EvaluatorReleaseSpecV1, LEARNED_EVALUATION_SCHEMA_VERSION,
+    CompactTaskCompletionVariantV1, EvaluationEvidenceCatalogV1, EvaluationEvidenceCitationV1,
+    EvaluationImplementationV1, EvaluatorReleaseSpecV1, LEARNED_EVALUATION_SCHEMA_VERSION,
     LearnedAbstentionReasonV1, LearnedEvaluationV1, LearnedVerdictV1,
     OpenAiTaskCompletionEvaluator, ProviderExecutionFailureV1, ProviderExecutionStageV1,
     ProviderResponseEnvelopeV1, TaskCompletionExecutionV1, TaskCompletionProjectionV1,
-    TraceContextBindingV1,
+    TraceContextBindingV1, TraceFactStatusV1,
 };
 
 use crate::config::AssessmentConfig;
@@ -108,6 +112,164 @@ impl TaskCompletionEvaluationRunner for OpenAiTaskCompletionRunner {
     }
 }
 
+struct RuntimeTokenCounter<'a>(&'a TaskCompletionOnnxRuntime);
+
+impl TaskCompletionTokenCounter for RuntimeTokenCounter<'_> {
+    fn tokenizer_id(&self) -> &str {
+        self.0
+            .manifest()
+            .tokenizer_file
+            .as_ref()
+            .map_or("missing-tokenizer", |file| file.sha256.as_str())
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<u32, String> {
+        self.0.count_tokens(text).map_err(|error| error.to_string())
+    }
+}
+
+/// Local task-completion execution uses the same immutable release and
+/// assessment commit path as the cloud judge. Only inference is different.
+pub struct LocalOnnxTaskCompletionRunner {
+    runtime: Mutex<TaskCompletionOnnxRuntime>,
+    projector: CompactTaskCompletionProjector,
+}
+
+impl LocalOnnxTaskCompletionRunner {
+    pub fn load(artifact_dir: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            runtime: Mutex::new(TaskCompletionOnnxRuntime::load(artifact_dir)?),
+            projector: CompactTaskCompletionProjector::default(),
+        })
+    }
+}
+
+impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
+    fn evaluate(
+        &self,
+        evaluator_release: EvaluatorReleaseSpecV1,
+        _config: &TaskCompletionReleaseConfigV1,
+        projection: &TaskCompletionProjectionV1,
+        binding: &TraceContextBindingV1,
+    ) -> anyhow::Result<TaskCompletionExecutionV1> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local task-completion runtime lock is poisoned"))?;
+        runtime.bind_to_release(&evaluator_release)?;
+        let compact = self.projector.project(
+            projection,
+            CompactTaskCompletionVariantV1::Complete,
+            &RuntimeTokenCounter(&runtime),
+        )?;
+        if compact.projector_version != runtime.manifest().lineage.projector_version {
+            anyhow::bail!(
+                "verified model artifact was trained for projector {}, but runtime produced {}",
+                runtime.manifest().lineage.projector_version,
+                compact.projector_version
+            );
+        }
+        let decision = runtime.decide_projection(&compact)?;
+        let probability = f64::from(decision.calibrated_probability_complete);
+        let (verdict, label, explanation) = match decision.label {
+            TaskCompletionLabelV1::Complete => (
+                LearnedVerdictV1::Pass,
+                "complete",
+                "The local learned judge found sufficient evidence that the requested task was completed.",
+            ),
+            TaskCompletionLabelV1::Incomplete => (
+                LearnedVerdictV1::Fail,
+                "incomplete",
+                "The local learned judge found that completion was unsupported or incomplete.",
+            ),
+        };
+        let evidence = if verdict == LearnedVerdictV1::Fail {
+            compact
+                .facts
+                .iter()
+                .filter(|fact| fact.mandatory && fact.status != TraceFactStatusV1::Succeeded)
+                .chain(compact.facts.iter().filter(|fact| fact.mandatory))
+                .chain(compact.facts.iter())
+                .find_map(|fact| {
+                    projection
+                        .evidence_catalog
+                        .entries
+                        .get(&fact.evidence_key)
+                        .map(|record| EvaluationEvidenceCitationV1 {
+                            evidence_key: fact.evidence_key.clone(),
+                            evidence_kind: record.evidence_kind,
+                            location: record.location.clone(),
+                            criterion_id: None,
+                        })
+                })
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let evaluation = LearnedEvaluationV1 {
+            schema_version: LEARNED_EVALUATION_SCHEMA_VERSION.into(),
+            evaluator_release_id: evaluator_release.release_id()?,
+            target_key: projection.target_key.clone(),
+            target_revision: projection.target_revision.clone(),
+            trace_context_binding_id: binding.binding_id()?,
+            projection_hash: projection.projection_hash.clone(),
+            verdict,
+            label: Some(label.into()),
+            score: Some(probability),
+            model_reported_confidence: Some(probability.max(1.0 - probability)),
+            explanation: explanation.into(),
+            evidence,
+            criteria: Vec::new(),
+            abstention_reason: None,
+        };
+        evaluation.validate_against(&projection.evidence_catalog)?;
+        Ok(TaskCompletionExecutionV1 {
+            evaluation,
+            provider: None,
+        })
+    }
+}
+
+pub struct ConfiguredTaskCompletionRunner {
+    cloud: OpenAiTaskCompletionRunner,
+    local: Option<LocalOnnxTaskCompletionRunner>,
+}
+
+impl ConfiguredTaskCompletionRunner {
+    pub fn new(local_artifact_dir: Option<&Path>) -> anyhow::Result<Self> {
+        Ok(Self {
+            cloud: OpenAiTaskCompletionRunner::new()?,
+            local: local_artifact_dir
+                .map(LocalOnnxTaskCompletionRunner::load)
+                .transpose()?,
+        })
+    }
+}
+
+impl TaskCompletionEvaluationRunner for ConfiguredTaskCompletionRunner {
+    fn evaluate(
+        &self,
+        evaluator_release: EvaluatorReleaseSpecV1,
+        config: &TaskCompletionReleaseConfigV1,
+        projection: &TaskCompletionProjectionV1,
+        binding: &TraceContextBindingV1,
+    ) -> anyhow::Result<TaskCompletionExecutionV1> {
+        match &evaluator_release.implementation {
+            EvaluationImplementationV1::PromptJudge { .. } => {
+                self.cloud
+                    .evaluate(evaluator_release, config, projection, binding)
+            }
+            EvaluationImplementationV1::LocalClassifier { .. } => self
+                .local
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no local task-completion artifact is configured"))?
+                .evaluate(evaluator_release, config, projection, binding),
+            _ => anyhow::bail!("unsupported task-completion evaluator implementation"),
+        }
+    }
+}
+
 /// PV-02's provider-backed task-completion executor. All durable inputs are
 /// loaded by exact project-scoped identity before the provider is considered.
 pub struct TaskCompletionAssessmentExecutor {
@@ -123,54 +285,21 @@ impl TaskCompletionAssessmentExecutor {
         })
     }
 
+    pub fn configured(
+        store: Arc<WorkspaceStore>,
+        local_artifact_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            store,
+            runner: Arc::new(ConfiguredTaskCompletionRunner::new(local_artifact_dir)?),
+        })
+    }
+
     pub fn with_runner(
         store: Arc<WorkspaceStore>,
         runner: Arc<dyn TaskCompletionEvaluationRunner>,
     ) -> Self {
         Self { store, runner }
-    }
-
-    fn load_inputs(
-        &self,
-        claim: &ClaimedAssessmentItemV1,
-    ) -> Result<
-        (
-            EvaluatorReleaseSpecV1,
-            TaskCompletionReleaseConfigV1,
-            TaskCompletionProjectionV1,
-            TraceContextBindingV1,
-        ),
-        String,
-    > {
-        let evaluator = self
-            .store
-            .evaluator_release(&claim.project_id, &claim.evaluator_release_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "exact evaluator release is unavailable".to_string())?;
-        let config = self
-            .store
-            .task_completion_release_config(&claim.project_id, &claim.evaluator_release_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "task-completion execution configuration is unavailable".to_string())?;
-        let projection = self
-            .store
-            .load_task_completion_projection(&claim.project_id, &claim.projection_hash)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "exact task-completion projection is unavailable".to_string())?;
-        let binding = self
-            .store
-            .trace_context_binding(&claim.project_id, &claim.context_binding_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "exact trace-context binding is unavailable".to_string())?;
-        if config.evaluator_release_id != claim.evaluator_release_id
-            || projection.target_key != claim.logical_trace_id
-            || projection.target_revision != claim.revision.to_string()
-            || projection.projection_hash != claim.projection_hash
-            || projection.trace_context_binding_id != claim.context_binding_id
-        {
-            return Err("assessment execution inputs do not match the claimed exact target".into());
-        }
-        Ok((evaluator, config, projection, binding))
     }
 }
 
@@ -204,13 +333,13 @@ impl LearnedAssessmentExecutor for TaskCompletionAssessmentExecutor {
             }
             Ok(Some(_)) => {}
         }
-        let (evaluator, config, projection, binding) = match self.load_inputs(claim) {
+        let inputs = match self.store.assessments().execution_inputs(claim) {
             Ok(inputs) => inputs,
             Err(error) => {
                 return execution_failure_commit(
                     AssessmentItemStatusV1::Failed,
                     "assessment_input_unavailable",
-                    &error,
+                    &error.to_string(),
                     false,
                     None,
                     None,
@@ -219,7 +348,18 @@ impl LearnedAssessmentExecutor for TaskCompletionAssessmentExecutor {
                 );
             }
         };
-        if let Some(status @ AssessmentItemStatusV1::ProviderUnavailable) = claim.preflight_status {
+        let perseval_store::AssessmentExecutionInputsV1 {
+            evaluator,
+            config,
+            projection,
+            binding,
+        } = inputs;
+        if let Some(status @ AssessmentItemStatusV1::ProviderUnavailable) = claim.preflight_status
+            && matches!(
+                &evaluator.implementation,
+                EvaluationImplementationV1::PromptJudge { .. }
+            )
+        {
             return abstention_commit_with_catalog(
                 claim,
                 status,
@@ -266,12 +406,12 @@ pub(crate) fn spawn_assessment_worker(
                 let estimate = config
                     .estimated_attempt_cost_micros
                     .max(executor.estimated_cost_micros(None));
-                match store.claim_next_assessment(&lease_owner, estimate) {
+                match store.assessments().claim_next(&lease_owner, estimate) {
                     Ok(Some(claim)) => {
                         // No SQLite guard exists here. Provider/model work is intentionally
                         // outside the durable writer transaction.
                         let commit = executor.execute(&claim);
-                        let _ = store.commit_assessment_attempt(&claim, &commit);
+                        let _ = store.assessments().commit_attempt(&claim, &commit);
                     }
                     Ok(None) | Err(_) => {
                         thread::sleep(Duration::from_millis(config.poll_interval_ms));

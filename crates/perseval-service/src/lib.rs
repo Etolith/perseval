@@ -12,6 +12,7 @@ pub mod jobs;
 pub mod live;
 pub mod queries;
 pub mod runtime;
+mod supervision;
 mod topology;
 
 pub use config::{
