@@ -2,6 +2,51 @@ use super::*;
 
 pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), StoreError> {
     connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);",
+    )?;
+    for migration in CONTROL_MIGRATIONS {
+        let applied = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+            [migration.version],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if applied {
+            continue;
+        }
+
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version) VALUES (?1)",
+            [migration.version],
+        )?;
+        (migration.apply)(&transaction)?;
+        transaction.commit()?;
+    }
+    Ok(())
+}
+
+struct ControlMigration {
+    version: i64,
+    apply: fn(&SqliteConnection) -> Result<(), StoreError>,
+}
+
+const CONTROL_MIGRATIONS: &[ControlMigration] = &[
+    // Versions 1-21 predate the incremental runner and are intentionally
+    // retained as one idempotent compatibility baseline. Databases carrying
+    // any earlier subset are reconciled once; databases already at v21 skip
+    // the historical DDL entirely.
+    ControlMigration {
+        version: 21,
+        apply: apply_control_v21_baseline,
+    },
+    ControlMigration {
+        version: 22,
+        apply: apply_control_v22_migration_metadata,
+    },
+];
+
+fn apply_control_v21_baseline(connection: &SqliteConnection) -> Result<(), StoreError> {
+    connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
          CREATE TABLE IF NOT EXISTS ingest_journal(
@@ -1166,6 +1211,29 @@ pub(super) fn migrate_control(connection: &SqliteConnection) -> Result<(), Store
          CREATE INDEX IF NOT EXISTS idx_traces_workspace_project_findings
             ON logical_traces(workspace_id, project_id, finding_count DESC, start_time_unix_nano DESC, logical_trace_id ASC);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (21);",
+    )?;
+    Ok(())
+}
+
+fn apply_control_v22_migration_metadata(connection: &SqliteConnection) -> Result<(), StoreError> {
+    ensure_control_column(
+        connection,
+        "schema_migrations",
+        "name",
+        "TEXT NOT NULL DEFAULT 'legacy-baseline'",
+    )?;
+    ensure_control_column(
+        connection,
+        "schema_migrations",
+        "applied_at_unix_ms",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    connection.execute(
+        "UPDATE schema_migrations
+            SET name = 'incremental-migration-metadata-v22',
+                applied_at_unix_ms = ?1
+          WHERE version = 22",
+        [now_unix_ms()],
     )?;
     Ok(())
 }

@@ -155,19 +155,7 @@ fn candidate_parts<'a>(
 }
 
 fn trace_span_kind(category: &str) -> SpanKind {
-    match category.to_ascii_lowercase().as_str() {
-        "llm" => SpanKind::Llm,
-        "agent" => SpanKind::Agent,
-        "tool" => SpanKind::Tool,
-        "chain" => SpanKind::Chain,
-        "retriever" => SpanKind::Retriever,
-        "reranker" => SpanKind::Reranker,
-        "embedding" => SpanKind::Embedding,
-        "guardrail" => SpanKind::Guardrail,
-        "evaluator" => SpanKind::Evaluator,
-        "prompt" => SpanKind::Prompt,
-        _ => SpanKind::Other,
-    }
+    traces_to_evals::semantic_span_kind(category)
 }
 
 fn validate_eval_batch_request(

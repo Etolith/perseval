@@ -1,6 +1,6 @@
 use duckdb::params as duck_params;
 
-use super::{StoreError, WorkspaceStore, topology::has_persisted_topology};
+use super::{StoreError, WorkspaceStore, persisted_json, topology::has_persisted_topology};
 use crate::model::{SpanRow, SpanTreePageV1};
 
 impl WorkspaceStore {
@@ -99,8 +99,12 @@ fn map_span_row(row: &duckdb::Row<'_>) -> duckdb::Result<SpanRow> {
         duration_nano: row.get::<_, i64>(7)? as u64,
         status_code: row.get(8)?,
         status_message: row.get(9)?,
-        attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
-        payload_refs: serde_json::from_str(&payload_refs_json).unwrap_or_default(),
+        attributes: persisted_json::decode_json_column(&attributes_json, 10, "span attributes")?,
+        payload_refs: persisted_json::decode_json_column(
+            &payload_refs_json,
+            11,
+            "span payload references",
+        )?,
         depth: row
             .get::<_, Option<i64>>(12)?
             .map(|depth| depth as u32)

@@ -30,6 +30,7 @@ hex = "0.4"
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "with-serde"] }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls", "api-24"] }
 perseval-ingest = { path = "crates/perseval-ingest" }
+perseval-model-runtime = { path = "crates/perseval-model-runtime" }
 perseval-service = { path = "crates/perseval-service" }
 perseval-store = { path = "crates/perseval-store" }
 prost = "0.14"
@@ -45,6 +46,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "1.1"
 tower = "0.5"
-traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "bcdfe74aed362eba92f70da95587b735316101b7", features = ["clustering-linfa", "embeddings-openai", "cluster-label-openai", "llm-judge-openai"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+traceeval-contracts = { git = "https://github.com/Etolith/traces-to-evals", rev = "f84cfdc9926e1f309694dcfd131f47a922ccbf5a" }
+traces-to-evals = { git = "https://github.com/Etolith/traces-to-evals", rev = "f84cfdc9926e1f309694dcfd131f47a922ccbf5a" }
 unicode-segmentation = "1.12"
 zstd = "0.13"

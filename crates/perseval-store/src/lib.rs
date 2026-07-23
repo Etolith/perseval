@@ -65,7 +65,10 @@ pub use model::{
     ThresholdPolicyReleaseV1, TopologyProjectionJobV1, TopologyProjectionRowV1, TraceChangeKind,
     TraceDeltaV1, TraceLifecycle, UNASSIGNED_PROJECT_ID,
 };
-pub use workspace::{JournalReceipt, StoreError, WorkspaceStore};
+pub use workspace::{
+    AssessmentExecutionInputsV1, AssessmentRepository, JournalReceipt, ReviewRepository,
+    StoreError, WorkspaceStore,
+};
 
 pub use traces_to_evals as analysis;
 pub use traces_to_evals::{

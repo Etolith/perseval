@@ -6,7 +6,7 @@ use std::path::Path;
 
 use perseval_model_runtime::{TaskCompletionOnnxRuntime, load_parity_fixture, verify_artifact};
 use serde::Serialize;
-use traces_to_evals::{CompactTaskCompletionProjectionV1, TaskCompletionTrainingRecordV1};
+use traceeval_contracts::{CompactTaskCompletionProjectionV1, TaskCompletionTrainingRecordV1};
 
 #[derive(Debug, Serialize)]
 struct TrainingRecordReport<'a> {

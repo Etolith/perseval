@@ -269,7 +269,7 @@ impl PersevalMcp {
             .service
             .run_count_filtered(&filters)
             .map_err(|error| internal_error(tool, error))?;
-        let mut rows = self
+        let rows = self
             .service
             .list_runs_filtered_ordered(
                 &filters,
@@ -278,25 +278,6 @@ impl PersevalMcp {
                 limit,
             )
             .map_err(|error| internal_error(tool, error))?;
-        if let Some(status) = input.analysis_status.first() {
-            rows.retain(|run| status.matches(run.analysis_status));
-        }
-        if let Some(search) = input
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            let search = search.to_lowercase();
-            rows.retain(|run| {
-                run.title.to_lowercase().contains(&search)
-                    || run.logical_trace_id.to_lowercase().contains(&search)
-                    || run
-                        .service_name
-                        .as_deref()
-                        .is_some_and(|value| value.to_lowercase().contains(&search))
-            });
-        }
         let data = rows.iter().map(projection::run).collect::<Vec<_>>();
         let mut warnings = Vec::new();
         if rows.iter().any(|run| {

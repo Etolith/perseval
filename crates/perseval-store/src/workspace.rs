@@ -4,9 +4,11 @@ mod comparison;
 mod context;
 mod diagnostics;
 mod ingest;
+mod persisted_json;
 mod projection;
 mod projects;
 mod read;
+mod repositories;
 mod reviews;
 mod schema;
 mod span_tree;
@@ -19,6 +21,8 @@ use projection::{
 };
 use schema::{migrate_analytics, migrate_control};
 use topology::{has_persisted_topology, recover_topology_jobs};
+
+pub use repositories::{AssessmentExecutionInputsV1, AssessmentRepository, ReviewRepository};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -225,94 +229,7 @@ fn safe_analysis_attributes(attributes: &BTreeMap<String, Value>) -> BTreeMap<St
 }
 
 fn is_safe_analysis_attribute_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "openinference.span.kind"
-            | "gen_ai.operation.name"
-            | "gen_ai.tool.name"
-            | "gen_ai.tool.call.id"
-            | "gen_ai.tool.status"
-            | "agent.operation"
-            | "agent.operation.effect"
-            | "agent.operation.retry_safety"
-            | "agent.tool.requirement"
-            | "agent.tool.attempt"
-            | "agent.tool.status"
-            | "agent.approval.required"
-            | "agent.approval.outcome"
-            | "agent.state.observation"
-            | "agent.state.predicate"
-            | "agent.state.artifact.id"
-            | "agent.final.status"
-            | "final.status"
-            | "agent.escalation.status"
-            | "final.escalation.status"
-            | "agent.outcome.claim.status"
-            | "agent.outcome.claim.operation"
-            | "agent.outcome.claim.call_id"
-            | "final.outcome.claim.status"
-            | "final.outcome.claim.operation"
-            | "final.outcome.claim.call_id"
-            | "agent.role"
-            | "agent.policy.id"
-            | "agent.policy.action"
-            | "agent.policy.outcome"
-            | "agent.policy.reason_code"
-            | "tool.name"
-            | "tool.call.id"
-            | "tool_call_id"
-            | "tool.status"
-            | "tool.result.success"
-            | "tool.timeout"
-            | "tool.cancelled"
-            | "tool.operation"
-            | "tool.effect"
-            | "tool.retry_safety"
-            | "tool.requirement"
-            | "tool.approval.required"
-            | "tool.approval.outcome"
-            | "tool.state.observation"
-            | "tool.state.predicate"
-            | "tool.state.artifact.id"
-            | "operation"
-            | "operation.name"
-            | "operation.effect"
-            | "operation.retry_safety"
-            | "operation.requirement"
-            | "execution.status"
-            | "execution.timeout"
-            | "duration_ms"
-            | "tool.duration_ms"
-            | "gen_ai.tool.duration_ms"
-            | "gen_ai.execute_tool.duration"
-            | "tool.duration"
-            | "execution.duration"
-            | "error.type"
-            | "error.code"
-            | "error.retryable"
-            | "tool.error.kind"
-            | "tool.error.code"
-            | "tool.error.retryable"
-            | "exception.type"
-            | "exception.escaped"
-            | "exception.recorded"
-            | "http.status_code"
-            | "http.response.status_code"
-            | "rpc.status_code"
-            | "protocol.status_code"
-            | "result.success"
-            | "result.ok"
-            | "policy.id"
-            | "policy.version"
-            | "policy.decision.id"
-            | "policy.decision.outcome"
-            | "policy.action"
-            | "policy.outcome"
-            | "policy.reason_code"
-            | "guardrail.outcome"
-            | "decision_id"
-            | "reason_code"
-    )
+    traces_to_evals::is_known_semantic_attribute_key(key)
 }
 
 fn is_bounded_safe_scalar(value: &Value) -> bool {

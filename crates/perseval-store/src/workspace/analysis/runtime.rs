@@ -328,9 +328,11 @@ impl WorkspaceStore {
                     decoder_version: row.get(11)?,
                     semantic_mapping_version: row.get(12)?,
                 }),
-                attributes: safe_analysis_attributes(
-                    &serde_json::from_str(&attributes_json).unwrap_or_default(),
-                ),
+                attributes: safe_analysis_attributes(&persisted_json::decode_json_column(
+                    &attributes_json,
+                    9,
+                    "analysis span attributes",
+                )?),
             })
         })?;
         let mut spans = rows.collect::<Result<Vec<_>, _>>()?;
@@ -358,9 +360,11 @@ impl WorkspaceStore {
                     SpanEvent {
                         name: row.get(1)?,
                         timestamp_unix_nano: row.get::<_, i64>(2)? as u64,
-                        attributes: safe_analysis_attributes(
-                            &serde_json::from_str(&attributes_json).unwrap_or_default(),
-                        ),
+                        attributes: safe_analysis_attributes(&persisted_json::decode_json_column(
+                            &attributes_json,
+                            3,
+                            "analysis span event attributes",
+                        )?),
                         identity: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     },
                 ))
@@ -391,9 +395,11 @@ impl WorkspaceStore {
                         trace_id: row.get(1)?,
                         span_id: row.get(2)?,
                         trace_state: row.get(3)?,
-                        attributes: safe_analysis_attributes(
-                            &serde_json::from_str(&attributes_json).unwrap_or_default(),
-                        ),
+                        attributes: safe_analysis_attributes(&persisted_json::decode_json_column(
+                            &attributes_json,
+                            4,
+                            "analysis span link attributes",
+                        )?),
                         identity: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                     },
                 ))

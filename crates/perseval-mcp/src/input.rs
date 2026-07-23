@@ -136,20 +136,16 @@ pub(crate) enum AnalysisStatusInput {
     Failed,
 }
 
-impl AnalysisStatusInput {
-    pub(crate) fn matches(self, value: perseval_service::AnalysisStatus) -> bool {
-        matches!(
-            (self, value),
-            (Self::NotReady, perseval_service::AnalysisStatus::NotReady)
-                | (Self::Pending, perseval_service::AnalysisStatus::Pending)
-                | (Self::Analyzing, perseval_service::AnalysisStatus::Analyzing)
-                | (Self::Ready, perseval_service::AnalysisStatus::Ready)
-                | (
-                    Self::Reanalyzing,
-                    perseval_service::AnalysisStatus::Reanalyzing
-                )
-                | (Self::Failed, perseval_service::AnalysisStatus::Failed)
-        )
+impl From<AnalysisStatusInput> for perseval_service::AnalysisStatus {
+    fn from(value: AnalysisStatusInput) -> Self {
+        match value {
+            AnalysisStatusInput::NotReady => Self::NotReady,
+            AnalysisStatusInput::Pending => Self::Pending,
+            AnalysisStatusInput::Analyzing => Self::Analyzing,
+            AnalysisStatusInput::Ready => Self::Ready,
+            AnalysisStatusInput::Reanalyzing => Self::Reanalyzing,
+            AnalysisStatusInput::Failed => Self::Failed,
+        }
     }
 }
 
@@ -198,6 +194,13 @@ impl ListRunsInput {
             scope: self.scope.query_scope(true)?,
             lifecycle: self.lifecycle.first().copied().map(Into::into),
             identity_quality: self.identity_quality.first().copied().map(Into::into),
+            analysis_status: self.analysis_status.first().copied().map(Into::into),
+            search: self
+                .search
+                .as_deref()
+                .map(str::trim)
+                .filter(|search| !search.is_empty())
+                .map(str::to_owned),
         })
     }
 }

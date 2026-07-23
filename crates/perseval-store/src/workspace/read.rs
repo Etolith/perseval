@@ -50,10 +50,14 @@ impl WorkspaceStore {
                AND (?6 = '' OR service_name = ?6)
                AND (?7 = '' OR lifecycle = ?7)
                AND (?8 = '' OR identity_quality = ?8)
-               AND (?9 IS NULL OR start_time_unix_nano >= ?9)
-               AND (?10 IS NULL OR start_time_unix_nano <= ?10)
+               AND (?9 = '' OR analysis_status = ?9)
+               AND (?10 = '' OR instr(lower(title), lower(?10)) > 0
+                    OR instr(lower(logical_trace_id), lower(?10)) > 0
+                    OR instr(lower(COALESCE(service_name, '')), lower(?10)) > 0)
+               AND (?11 IS NULL OR start_time_unix_nano >= ?11)
+               AND (?12 IS NULL OR start_time_unix_nano <= ?12)
              ORDER BY {ordering}
-             LIMIT ?11 OFFSET ?12"
+             LIMIT ?13 OFFSET ?14"
         );
         let mut statement = control.prepare(&query)?;
         statement
@@ -70,6 +74,11 @@ impl WorkspaceStore {
                         .identity_quality
                         .map(IdentityQualityV1::as_str)
                         .unwrap_or(""),
+                    filters
+                        .analysis_status
+                        .map(AnalysisStatus::as_str)
+                        .unwrap_or(""),
+                    filters.search.as_deref().unwrap_or(""),
                     scope.started_after_unix_nano.map(|value| value as i64),
                     scope.started_before_unix_nano.map(|value| value as i64),
                     limit as i64,
@@ -103,8 +112,12 @@ impl WorkspaceStore {
                AND (?6 = '' OR service_name = ?6)
                AND (?7 = '' OR lifecycle = ?7)
                AND (?8 = '' OR identity_quality = ?8)
-               AND (?9 IS NULL OR start_time_unix_nano >= ?9)
-               AND (?10 IS NULL OR start_time_unix_nano <= ?10)"
+               AND (?9 = '' OR analysis_status = ?9)
+               AND (?10 = '' OR instr(lower(title), lower(?10)) > 0
+                    OR instr(lower(logical_trace_id), lower(?10)) > 0
+                    OR instr(lower(COALESCE(service_name, '')), lower(?10)) > 0)
+               AND (?11 IS NULL OR start_time_unix_nano >= ?11)
+               AND (?12 IS NULL OR start_time_unix_nano <= ?12)"
         );
         Ok(control.query_row(
             &query,
@@ -120,6 +133,11 @@ impl WorkspaceStore {
                     .identity_quality
                     .map(IdentityQualityV1::as_str)
                     .unwrap_or(""),
+                filters
+                    .analysis_status
+                    .map(AnalysisStatus::as_str)
+                    .unwrap_or(""),
+                filters.search.as_deref().unwrap_or(""),
                 scope.started_after_unix_nano.map(|value| value as i64),
                 scope.started_before_unix_nano.map(|value| value as i64),
             ],
@@ -278,8 +296,16 @@ impl WorkspaceStore {
                         .map(|depth| depth as u32)
                         .unwrap_or_default(),
                     has_children: row.get::<_, Option<bool>>(13)?.unwrap_or(false),
-                    attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
-                    payload_refs: serde_json::from_str(&payload_refs_json).unwrap_or_default(),
+                    attributes: persisted_json::decode_json_column(
+                        &attributes_json,
+                        10,
+                        "span attributes",
+                    )?,
+                    payload_refs: persisted_json::decode_json_column(
+                        &payload_refs_json,
+                        11,
+                        "span payload references",
+                    )?,
                     events: Vec::new(),
                     links: Vec::new(),
                 })
@@ -338,8 +364,16 @@ impl WorkspaceStore {
                             .map(|value| value as u32)
                             .unwrap_or_default(),
                         has_children: row.get::<_, Option<bool>>(13)?.unwrap_or(false),
-                        attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
-                        payload_refs: serde_json::from_str(&payload_refs_json).unwrap_or_default(),
+                        attributes: persisted_json::decode_json_column(
+                            &attributes_json,
+                            10,
+                            "span attributes",
+                        )?,
+                        payload_refs: persisted_json::decode_json_column(
+                            &payload_refs_json,
+                            11,
+                            "span payload references",
+                        )?,
                         events: Vec::new(),
                         links: Vec::new(),
                     })
@@ -375,7 +409,11 @@ impl WorkspaceStore {
                         Ok(crate::model::SpanEventV1 {
                             name: row.get(0)?,
                             timestamp_unix_nano: row.get::<_, i64>(1)? as u64,
-                            attributes: serde_json::from_str(&attributes).unwrap_or_default(),
+                            attributes: persisted_json::decode_json_column(
+                                &attributes,
+                                2,
+                                "span event attributes",
+                            )?,
                             dropped_attributes_count: 0,
                         })
                     },
@@ -398,7 +436,11 @@ impl WorkspaceStore {
                             trace_id: row.get(0)?,
                             span_id: row.get(1)?,
                             trace_state: String::new(),
-                            attributes: serde_json::from_str(&attributes).unwrap_or_default(),
+                            attributes: persisted_json::decode_json_column(
+                                &attributes,
+                                3,
+                                "span link attributes",
+                            )?,
                             dropped_attributes_count: 0,
                             flags: 0,
                         })
