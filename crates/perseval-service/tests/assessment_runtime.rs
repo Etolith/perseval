@@ -2710,6 +2710,14 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
         Some(1),
         "a repository without an explicit heading still needs a conservative, human-reviewable completion criterion"
     );
+    let fallback_release_id = service
+        .approve_agent_context_draft(&fallback.draft_id, "qa-reviewer", ReviewAuthorityV1::Human)
+        .expect("the conservative fallback criterion must pass release validation");
+    let fallback_governance = service.agent_context_governance_summary("plain").unwrap();
+    assert_eq!(
+        fallback_governance.latest_context_release_id.as_deref(),
+        Some(fallback_release_id.as_str())
+    );
     service.shutdown();
 }
 

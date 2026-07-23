@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AppContext, Context, Div, Entity, FontWeight, IntoElement, Render, Role, Window, div,
@@ -388,6 +388,7 @@ impl QualityCheckStudio {
                             job.item_count
                         ));
                         this.reload(cx);
+                        this.watch_job(job.job_id, cx);
                     }
                     Err(error) => {
                         this.error = Some(format!(
@@ -400,6 +401,50 @@ impl QualityCheckStudio {
         })
         .detach();
         cx.notify();
+    }
+
+    fn watch_job(&mut self, job_id: String, cx: &mut Context<Self>) {
+        let Some(project_id) = self.project_id.clone() else {
+            return;
+        };
+        let service = self.service.clone();
+        let executor = cx.background_executor().clone();
+        let task = cx.background_spawn(async move {
+            loop {
+                let job = service
+                    .assessment_job(&project_id, &job_id)?
+                    .ok_or_else(|| {
+                        perseval_service::LiveServiceError::InvalidInput(
+                            "the assessment run disappeared before completion".into(),
+                        )
+                    })?;
+                if job.terminal_count >= job.item_count {
+                    return Ok::<_, perseval_service::LiveServiceError>(job);
+                }
+                executor.timer(Duration::from_millis(250)).await;
+            }
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                match result {
+                    Ok(job) => {
+                        this.notice = Some(format!(
+                            "Run {} finished: {} of {} traces reached a final result.",
+                            short_id(&job.job_id),
+                            job.terminal_count,
+                            job.item_count
+                        ));
+                        this.reload(cx);
+                    }
+                    Err(error) => {
+                        this.error = Some(format!("Could not refresh the quality check: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_sampling(&mut self, cx: &mut Context<Self>) {

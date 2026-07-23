@@ -538,11 +538,29 @@ impl SettingsScreen {
         if self.preparing_context {
             return;
         }
-        let (Some(service), Some(project_id), Some(draft)) = (
-            self.service.clone(),
-            self.selected_project_id.clone(),
-            self.context_governance.latest_draft.clone(),
-        ) else {
+        let Some(service) = self.service.clone() else {
+            self.context_notice = Some((
+                "The local Perseval service is unavailable. Restart Perseval and try again.".into(),
+                Theme::RED,
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.context_notice = Some((
+                "Choose a project before approving its agent specification.".into(),
+                Theme::RED,
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(draft) = self.context_governance.latest_draft.clone() else {
+            self.context_notice = Some((
+                "This agent specification draft is no longer available. Prepare a new draft."
+                    .into(),
+                Theme::RED,
+            ));
+            cx.notify();
             return;
         };
         let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
@@ -551,38 +569,29 @@ impl SettingsScreen {
             "Activating an immutable specification release…".into(),
             Theme::CYAN,
         ));
-        let task = cx.background_spawn(async move {
-            let release_id = service.approve_agent_context_draft(
-                &draft.draft_id,
-                &reviewer,
-                ReviewAuthorityV1::Human,
-            )?;
-            let context = service.agent_context_governance_summary(&project_id)?;
-            Ok::<_, perseval_service::LiveServiceError>((release_id, context))
-        });
-        cx.spawn(async move |weak, cx| {
-            let result = task.await;
-            let _ = weak.update(cx, |this, cx| {
-                this.preparing_context = false;
-                match result {
-                    Ok((release_id, context)) => {
-                        this.context_governance = context;
-                        this.context_notice = Some((
-                            format!(
-                                "Activated immutable release {}. Configure reviewed trace-binding rules before running context-dependent evaluators.",
-                                short_identity(&release_id)
-                            ),
-                            Theme::GREEN,
-                        ));
-                    }
-                    Err(error) => {
-                        this.context_notice = Some((error.to_string(), Theme::RED));
-                    }
-                }
-                cx.notify();
+        let result = service
+            .approve_agent_context_draft(&draft.draft_id, &reviewer, ReviewAuthorityV1::Human)
+            .and_then(|release_id| {
+                service
+                    .agent_context_governance_summary(&project_id)
+                    .map(|context| (release_id, context))
             });
-        })
-        .detach();
+        self.preparing_context = false;
+        match result {
+            Ok((release_id, context)) => {
+                self.context_governance = context;
+                self.context_notice = Some((
+                    format!(
+                        "Activated immutable release {}. Configure reviewed trace-binding rules before running context-dependent evaluators.",
+                        short_identity(&release_id)
+                    ),
+                    Theme::GREEN,
+                ));
+            }
+            Err(error) => {
+                self.context_notice = Some((error.to_string(), Theme::RED));
+            }
+        }
         cx.notify();
     }
 

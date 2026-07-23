@@ -447,7 +447,13 @@ impl LearnedAssessmentExecutor for TaskCompletionAssessmentExecutor {
                 &config,
                 started,
             ),
-            Err(error) => task_completion_error_commit(claim, &projection, &config, error, started),
+            Err(error) => {
+                eprintln!(
+                    "task-completion evaluation failed for {} revision {}: {error:#}",
+                    claim.logical_trace_id, claim.revision
+                );
+                task_completion_error_commit(claim, &projection, &config, error, started)
+            }
         }
     }
 }
