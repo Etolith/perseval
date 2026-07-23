@@ -11,8 +11,9 @@ use perseval_service::analysis::{
 };
 use perseval_service::{
     ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION, AssessmentBackfillPreviewV1, AssessmentJobV1,
-    AssessmentSamplingPolicyV1, LiveTraceService, ReviewAuthorityV1,
-    TaskCompletionQualityCheckDraftV1, TaskCompletionQualityCheckV1, TaxonomyGovernanceSummaryV1,
+    AssessmentSamplingPolicyV1, LiveTraceService, LocalTaskCompletionModelV1, ReviewAuthorityV1,
+    TaskCompletionExecutionRouteV1, TaskCompletionQualityCheckDraftV1,
+    TaskCompletionQualityCheckV1, TaxonomyGovernanceSummaryV1,
 };
 
 use crate::components::{TextInput, button_state, tag};
@@ -27,6 +28,8 @@ pub(crate) struct QualityCheckStudio {
     jobs: Vec<AssessmentJobV1>,
     preview: Option<AssessmentBackfillPreviewV1>,
     taxonomy: TaxonomyGovernanceSummaryV1,
+    execution_route: TaskCompletionExecutionRouteV1,
+    local_model: Option<LocalTaskCompletionModelV1>,
     name: Entity<TextInput>,
     criteria: Entity<TextInput>,
     model: Entity<TextInput>,
@@ -46,6 +49,12 @@ impl QualityCheckStudio {
         reviewer_ref: String,
         cx: &mut Context<Self>,
     ) -> Self {
+        let local_model = service.local_task_completion_model();
+        let execution_route = if local_model.is_some() {
+            TaskCompletionExecutionRouteV1::LocalOnnx
+        } else {
+            TaskCompletionExecutionRouteV1::HostedOpenAi
+        };
         let name = input("Task completion", "Quality check name", 160, cx);
         let criteria = input(
             "Return completed, partial, failed, or abstain. Evaluate each declared success criterion and cite every decision to exact observed trace evidence.",
@@ -66,6 +75,8 @@ impl QualityCheckStudio {
             jobs: Vec::new(),
             preview: None,
             taxonomy: TaxonomyGovernanceSummaryV1::default(),
+            execution_route,
+            local_model,
             name,
             criteria,
             model,
@@ -136,7 +147,8 @@ impl QualityCheckStudio {
                         }
                         if context.latest_context_release_id.is_none() {
                             this.notice = Some(
-                                "Approve an agent specification before publishing a task-completion quality check.".into(),
+                                "Set up the agent in Settings before creating a quality check."
+                                    .into(),
                             );
                         }
                     }
@@ -166,6 +178,25 @@ impl QualityCheckStudio {
         cx.notify();
     }
 
+    fn select_execution_route(
+        &mut self,
+        route: TaskCompletionExecutionRouteV1,
+        cx: &mut Context<Self>,
+    ) {
+        if route == TaskCompletionExecutionRouteV1::LocalOnnx && self.local_model.is_none() {
+            self.error = Some(
+                "Configure a verified local model artifact in Settings, then restart Perseval."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.execution_route = route;
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
     fn publish(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -178,22 +209,35 @@ impl QualityCheckStudio {
         let service = self.service.clone();
         let reviewer_ref = self.reviewer_ref.clone();
         let name = self.name.read(cx).text().trim().to_string();
-        let review_criteria = self.criteria.read(cx).text().trim().to_string();
-        let requested_model = self.model.read(cx).text().trim().to_string();
-        let pricing_version = self.pricing_version.read(cx).text().trim().to_string();
-        let input_rate = self.input_rate.read(cx).text().trim().parse::<u64>();
-        let output_rate = self.output_rate.read(cx).text().trim().parse::<u64>();
-        let (Ok(input_rate), Ok(output_rate)) = (input_rate, output_rate) else {
-            self.error = Some(
-                "Enter the exact input and output rate-card amounts in micros per million tokens."
-                    .into(),
-            );
-            cx.notify();
-            return;
-        };
+        let execution_route = self.execution_route;
+        let (review_criteria, requested_model, pricing_version, input_rate, output_rate) =
+            match execution_route {
+                TaskCompletionExecutionRouteV1::LocalOnnx => {
+                    (String::new(), String::new(), String::new(), 0, 0)
+                }
+                TaskCompletionExecutionRouteV1::HostedOpenAi => {
+                    let input_rate = self.input_rate.read(cx).text().trim().parse::<u64>();
+                    let output_rate = self.output_rate.read(cx).text().trim().parse::<u64>();
+                    let (Ok(input_rate), Ok(output_rate)) = (input_rate, output_rate) else {
+                        self.error = Some(
+                        "Enter the exact input and output rate-card amounts in micros per million tokens."
+                            .into(),
+                    );
+                        cx.notify();
+                        return;
+                    };
+                    (
+                        self.criteria.read(cx).text().trim().to_string(),
+                        self.model.read(cx).text().trim().to_string(),
+                        self.pricing_version.read(cx).text().trim().to_string(),
+                        input_rate,
+                        output_rate,
+                    )
+                }
+            };
         self.busy = true;
         self.error = None;
-        self.notice = Some("Preparing an immutable release for human activation…".into());
+        self.notice = Some("Creating the quality check…".into());
         let taxonomy_node_ids = self
             .taxonomy
             .active_nodes
@@ -218,6 +262,7 @@ impl QualityCheckStudio {
             let draft = TaskCompletionQualityCheckDraftV1 {
                 name,
                 review_criteria,
+                execution_route,
                 requested_model,
                 context_release_id,
                 applicable_taxonomy_node_ids: taxonomy_node_ids,
@@ -243,7 +288,7 @@ impl QualityCheckStudio {
                     Ok(release_id) => {
                         this.selected_release_id = Some(release_id.clone());
                         this.notice = Some(format!(
-                            "Published immutable quality check {}. Preview exact targets before running it.",
+                            "Quality check {} is ready. Preview the traces before running it.",
                             short_id(&release_id)
                         ));
                         this.reload(cx);
@@ -271,7 +316,7 @@ impl QualityCheckStudio {
         let context_release_id = check.config.context_release_id.clone();
         self.busy = true;
         self.error = None;
-        self.notice = Some("Projecting the exact finalized revisions and estimating cost…".into());
+        self.notice = Some("Preparing the trace preview…".into());
         let service = self.service.clone();
         let task = cx.background_spawn(async move {
             let targets = service.preview_context_backfill(&project_id, &context_release_id)?;
@@ -287,10 +332,8 @@ impl QualityCheckStudio {
                 this.busy = false;
                 match result {
                     Ok(preview) => {
-                        this.notice = Some(
-                            "Preview is read-only. The selection hash will be checked again when you run it."
-                                .into(),
-                        );
+                        this.notice =
+                            Some("Preview ready. Perseval will recheck it before the run.".into());
                         this.preview = Some(preview);
                     }
                     Err(error) => this.error = Some(error.to_string()),
@@ -312,7 +355,7 @@ impl QualityCheckStudio {
         };
         self.busy = true;
         self.error = None;
-        self.notice = Some("Verifying the preview and creating an idempotent job…".into());
+        self.notice = Some("Starting the quality check…".into());
         let service = self.service.clone();
         let exact_revisions = preview
             .targets
@@ -340,7 +383,7 @@ impl QualityCheckStudio {
                 match result {
                     Ok(job) => {
                         this.notice = Some(format!(
-                            "Job {} accepted for {} exact revision(s).",
+                            "Run {} started for {} trace(s).",
                             short_id(&job.job_id),
                             job.item_count
                         ));
@@ -348,7 +391,7 @@ impl QualityCheckStudio {
                     }
                     Err(error) => {
                         this.error = Some(format!(
-                            "The preview was not run. Refresh it and review any changed targets: {error}"
+                            "The traces changed before the run. Preview them again: {error}"
                         ));
                     }
                 }
@@ -395,9 +438,10 @@ impl QualityCheckStudio {
                 match result {
                     Ok(()) => {
                         this.notice = Some(if enabled {
-                            "Continuous sampling enabled at 10%, capped at 100 targets per UTC day. The quality-check release identity did not change.".into()
+                            "Automatic 10% sampling is on, capped at 100 traces per day.".into()
                         } else {
-                            "Continuous sampling disabled. The immutable quality-check release remains available for explicit runs.".into()
+                            "Automatic sampling is off. You can still run this check manually."
+                                .into()
                         });
                         this.reload(cx);
                     }
@@ -411,26 +455,32 @@ impl QualityCheckStudio {
     }
 
     fn render_builder(&self, compact: bool, cx: &mut Context<Self>) -> Div {
+        let hosted_ready = self.execution_route == TaskCompletionExecutionRouteV1::LocalOnnx
+            || (!self.model.read(cx).text().trim().is_empty()
+                && !self.pricing_version.read(cx).text().trim().is_empty()
+                && self
+                    .input_rate
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok()
+                && self
+                    .output_rate
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok());
         let ready = self.project_id.is_some()
             && !self.busy
             && !self.name.read(cx).text().trim().is_empty()
-            && !self.criteria.read(cx).text().trim().is_empty()
-            && !self.model.read(cx).text().trim().is_empty()
-            && !self.pricing_version.read(cx).text().trim().is_empty()
-            && self
-                .input_rate
-                .read(cx)
-                .text()
-                .trim()
-                .parse::<u64>()
-                .is_ok()
-            && self
-                .output_rate
-                .read(cx)
-                .text()
-                .trim()
-                .parse::<u64>()
-                .is_ok();
+            && (self.execution_route == TaskCompletionExecutionRouteV1::LocalOnnx
+                || !self.criteria.read(cx).text().trim().is_empty())
+            && hosted_ready;
+        let local_selected = self.execution_route == TaskCompletionExecutionRouteV1::LocalOnnx;
+        let hosted_selected = self.execution_route == TaskCompletionExecutionRouteV1::HostedOpenAi;
+        let local_model = self.local_model.clone();
         div()
             .p_4()
             .rounded(px(8.))
@@ -441,47 +491,117 @@ impl QualityCheckStudio {
                 div()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("New task-completion quality check"),
+                    .child("New quality check"),
             )
             .child(
                 div()
                     .mt_1()
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("The agent specification supplies goals and success criteria. This release supplies the judge rubric, exact model, outbound projection, applicability, and rate card."),
+                    .child("Uses the approved agent goals and success criteria."),
             )
             .child(form_row("Name", self.name.clone(), compact))
-            .child(form_row("Review criteria", self.criteria.clone(), compact))
-            .child(form_row("Provider model", self.model.clone(), compact))
-            .child(form_row(
-                "Rate-card version",
-                self.pricing_version.clone(),
-                compact,
-            ))
-            .child(form_row(
-                "Input micros / 1M tokens",
-                self.input_rate.clone(),
-                compact,
-            ))
-            .child(form_row(
-                "Output micros / 1M tokens",
-                self.output_rate.clone(),
-                compact,
-            ))
+            .child(
+                div()
+                    .mt_3()
+                    .text_xs()
+                    .text_color(Theme::MUTED)
+                    .child("Execution"),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        button_state("On this Mac", local_selected, local_model.is_some())
+                            .id("task-completion-route-local")
+                            .role(Role::Button)
+                            .aria_label("Use the verified local task-completion model")
+                            .when(local_model.is_some(), |button| {
+                                button.on_click(cx.listener(|this, _, _, cx| {
+                                    this.select_execution_route(
+                                        TaskCompletionExecutionRouteV1::LocalOnnx,
+                                        cx,
+                                    )
+                                }))
+                            }),
+                    )
+                    .child(
+                        button_state("OpenAI", hosted_selected, true)
+                            .id("task-completion-route-openai")
+                            .role(Role::Button)
+                            .aria_label("Use a hosted OpenAI task-completion judge")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_execution_route(
+                                    TaskCompletionExecutionRouteV1::HostedOpenAi,
+                                    cx,
+                                )
+                            })),
+                    ),
+            )
+            .when(local_selected, |builder| {
+                builder.when_some(local_model, |builder, _model| {
+                    builder
+                        .child(
+                            div()
+                                .mt_3()
+                                .p_3()
+                                .rounded_sm()
+                                .bg(Theme::PANEL_SURFACE)
+                                .text_xs()
+                                .text_color(Theme::MUTED)
+                                .child("Ready"),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .text_xs()
+                                .text_color(Theme::AMBER)
+                                .child("Development model · $0 provider cost"),
+                        )
+                })
+            })
+            .when(hosted_selected, |builder| {
+                builder
+                    .child(form_row("Review criteria", self.criteria.clone(), compact))
+                    .child(form_row("Provider model", self.model.clone(), compact))
+                    .child(form_row(
+                        "Rate-card version",
+                        self.pricing_version.clone(),
+                        compact,
+                    ))
+                    .child(form_row(
+                        "Input micros / 1M tokens",
+                        self.input_rate.clone(),
+                        compact,
+                    ))
+                    .child(form_row(
+                        "Output micros / 1M tokens",
+                        self.output_rate.clone(),
+                        compact,
+                    ))
+            })
             .child(
                 div()
                     .mt_3()
                     .text_xs()
                     .text_color(Theme::DIM)
-                    .child("Hosted pre-redacted summaries · unresolved or ambiguous context abstains · active task/capability/policy definitions are bound by stable ID · activation is human-only"),
+                    .child(if local_selected {
+                        "Trace evidence stays on this Mac. Traces with missing context are skipped."
+                    } else {
+                        "Sends redacted summaries to OpenAI. Traces with missing context are skipped."
+                    }),
             )
             .child(
                 div().mt_4().child(
-                    button_state("Publish immutable release", true, ready)
+                    button_state("Create quality check", true, ready)
                         .id("publish-task-completion-check")
                         .role(Role::Button)
                         .aria_label(if ready {
                             "Publish immutable task-completion quality check"
+                        } else if local_selected && self.local_model.is_none() {
+                            "Publishing unavailable until a verified local model is configured in Settings"
                         } else {
                             "Publishing unavailable until project, specification, model, and exact rate card are complete"
                         })
@@ -502,7 +622,7 @@ impl QualityCheckStudio {
                     .bg(Theme::PANEL_SURFACE)
                     .text_xs()
                     .text_color(Theme::MUTED)
-                    .child("No learned quality-check release exists in this project yet."),
+                    .child("No quality checks yet."),
             );
         }
         for (index, check) in self.quality_checks.iter().enumerate() {
@@ -512,6 +632,27 @@ impl QualityCheckStudio {
                 .sampling_policy
                 .as_ref()
                 .is_some_and(|policy| policy.enabled);
+            let model_label = match &check.evaluator.implementation {
+                EvaluationImplementationV1::PromptJudge {
+                    requested_model, ..
+                } => format!("OpenAI {requested_model}"),
+                EvaluationImplementationV1::LocalClassifier {
+                    model_artifact_id, ..
+                } => self
+                    .local_model
+                    .as_ref()
+                    .filter(|model| model.model_artifact_id == *model_artifact_id)
+                    .map_or_else(
+                        || format!("Local {}", short_id(model_artifact_id)),
+                        |model| format!("Local {}", model.model_id),
+                    ),
+                _ => "Unsupported runtime".into(),
+            };
+            let route_label = match &check.evaluator.implementation {
+                EvaluationImplementationV1::PromptJudge { .. } => "OpenAI",
+                EvaluationImplementationV1::LocalClassifier { .. } => "On this Mac",
+                _ => "Unavailable",
+            };
             list = list.child(
                 div()
                     .id(("quality-check-release", index))
@@ -520,7 +661,7 @@ impl QualityCheckStudio {
                         "Quality check {}, release {}, model {}, sampling {}",
                         check.evaluator.name,
                         short_id(&check.config.evaluator_release_id),
-                        check.config.requested_model,
+                        model_label,
                         if sampling { "enabled" } else { "disabled" }
                     ))
                     .tab_index(0)
@@ -547,13 +688,12 @@ impl QualityCheckStudio {
                             .text_xs()
                             .text_color(Theme::MUTED)
                             .child(format!(
-                                "{} · {} · {}",
-                                short_id(&check.config.evaluator_release_id),
-                                check.config.requested_model,
+                                "{} · {}",
+                                route_label,
                                 if sampling {
-                                    "sampling 10%"
+                                    "automatic 10% sampling"
                                 } else {
-                                    "explicit runs"
+                                    "manual runs"
                                 }
                             )),
                     ),
@@ -580,11 +720,29 @@ impl QualityCheckStudio {
                 .bg(Theme::PANEL)
                 .text_sm()
                 .text_color(Theme::MUTED)
-                .child("Publish or select a quality check to preview an exact run.");
+                .child("Create or select a quality check to preview traces.");
         };
         let rubric = match &check.evaluator.implementation {
             EvaluationImplementationV1::PromptJudge { rubric, .. } => rubric.as_str(),
+            EvaluationImplementationV1::LocalClassifier { .. } => {
+                "Checks completion against the approved success criteria."
+            }
             _ => "This release does not use a prompt rubric.",
+        };
+        let execution = match &check.evaluator.implementation {
+            EvaluationImplementationV1::PromptJudge {
+                requested_model, ..
+            } => format!(
+                "OpenAI · requested {} · {} · output estimate {}–{} tokens",
+                requested_model,
+                check.config.pricing_version,
+                check.config.estimated_output_tokens_low,
+                check.config.estimated_output_tokens_high
+            ),
+            EvaluationImplementationV1::LocalClassifier { .. } => {
+                "On this Mac · $0 provider cost".into()
+            }
+            _ => "Unsupported evaluator implementation".into(),
         };
         let sampling_enabled = check
             .sampling_policy
@@ -616,45 +774,31 @@ impl QualityCheckStudio {
                                 )
                                 .child(div().mt_1().text_xs().text_color(Theme::MUTED).child(
                                     format!(
-                                        "Immutable {} · specification {}",
-                                        short_id(&check.config.evaluator_release_id),
-                                        short_id(&check.config.context_release_id)
+                                        "Approved version {}",
+                                        short_id(&check.config.evaluator_release_id)
                                     ),
                                 )),
                         )
                         .child(tag("TASK COMPLETION", Theme::CYAN)),
                 )
-                .child(detail_row("Review criteria", rubric))
+                .child(detail_row("Decision", rubric))
+                .child(detail_row("Runs", &execution))
                 .child(detail_row(
-                    "Execution",
-                    &format!(
-                        "OpenAI · requested {} · {} · output estimate {}–{} tokens",
-                        check.config.requested_model,
-                        check.config.pricing_version,
-                        check.config.estimated_output_tokens_low,
-                        check.config.estimated_output_tokens_high
-                    ),
+                    "Data",
+                    if matches!(
+                        &check.evaluator.implementation,
+                        EvaluationImplementationV1::LocalClassifier { .. }
+                    ) {
+                        "Stays on this Mac"
+                    } else {
+                        "Redacted summaries are sent to OpenAI"
+                    },
                 ))
                 .child(detail_row(
-                    "Outbound content",
+                    "Scope",
                     &format!(
-                        "{:?} · context projection {} · trace projection {}",
-                        check.config.projector.content_policy,
-                        short_id(&check.evaluator.context_projection_release_id),
-                        short_id(&check.evaluator.projection_release_id)
-                    ),
-                ))
-                .child(detail_row(
-                    "Applicability",
-                    &format!(
-                        "{} stable task/capability/policy definition(s) · taxonomy release {}",
-                        check.evaluator.applicable_taxonomy_node_ids.len(),
-                        check
-                            .evaluator
-                            .applicable_taxonomy_release_id
-                            .as_deref()
-                            .map(short_id)
-                            .unwrap_or("global")
+                        "{} task type(s)",
+                        check.evaluator.applicable_taxonomy_node_ids.len()
                     ),
                 ))
                 .child(
@@ -664,7 +808,7 @@ impl QualityCheckStudio {
                         .flex_wrap()
                         .gap_2()
                         .child(
-                            button_state("Preview all finalized revisions", true, preview_enabled)
+                            button_state("Preview traces", true, preview_enabled)
                                 .id("preview-task-completion-backfill")
                                 .role(Role::Button)
                                 .when(preview_enabled, |button| {
@@ -703,12 +847,12 @@ impl QualityCheckStudio {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Exact run preview"),
+                            .child("Ready to run"),
                     )
                     .child(detail_row(
-                        "Targets",
+                        "Traces",
                         &format!(
-                            "{} exact · {} executable · {} excluded",
+                            "{} selected · {} ready · {} skipped",
                             preview.target_count,
                             preview.executable_count,
                             preview.non_executable_count
@@ -729,13 +873,9 @@ impl QualityCheckStudio {
                             format_cost(preview.estimated_cost_micros_high)
                         ),
                     ))
-                    .child(detail_row(
-                        "Content policy",
-                        &format!("{:?}", preview.content_policy),
-                    ))
                     .child(
                         div().mt_3().child(
-                            button_state("Run this exact preview", true, run_enabled)
+                            button_state("Run quality check", true, run_enabled)
                                 .id("run-task-completion-preview")
                                 .role(Role::Button)
                                 .aria_label(
@@ -765,7 +905,7 @@ impl QualityCheckStudio {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(Theme::MUTED)
-                        .child("RECENT RUNS"),
+                        .child("RUNS"),
                 )
                 .when(related_jobs.is_empty(), |list| {
                     list.child(
@@ -773,7 +913,7 @@ impl QualityCheckStudio {
                             .mt_2()
                             .text_xs()
                             .text_color(Theme::DIM)
-                            .child("No jobs for this release yet."),
+                            .child("No runs yet."),
                     )
                 })
                 .children(related_jobs.into_iter().map(|job| {
@@ -827,7 +967,7 @@ impl Render for QualityCheckStudio {
                             .mt_1()
                             .text_sm()
                             .text_color(Theme::MUTED)
-                            .child("Publish learned, evidence-grounded reviews; preview exact scope and spend before execution."),
+                            .child("Choose how to review a task, preview the traces, then run it."),
                     ),
             )
             .when_some(self.notice.clone(), |view, notice| {

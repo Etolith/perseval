@@ -1,4 +1,8 @@
-use gpui::{Entity, FontWeight, Role, Toggled, Window, div, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{
+    AccessibleAction, ClickEvent, Entity, FontWeight, Role, Toggled, Window, div, prelude::*, px,
+};
 
 use crate::components::{TextInput, button};
 use crate::design::{ControlSize, Theme};
@@ -222,6 +226,7 @@ pub(super) fn action_button<F>(
 where
     F: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
+    let on_click = Rc::new(on_click);
     div()
         .id(aria_label.to_ascii_lowercase().replace(' ', "-"))
         .role(Role::Button)
@@ -253,10 +258,15 @@ where
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
         .when(enabled, |button| {
+            let mouse_on_click = on_click.clone();
+            let accessible_on_click = on_click.clone();
             button
                 .cursor_pointer()
                 .focus_visible(|style| style.border_2().border_color(Theme::CYAN))
-                .on_click(on_click)
+                .on_click(move |event, window, cx| mouse_on_click(event, window, cx))
+                .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                    accessible_on_click(&ClickEvent::default(), window, cx);
+                })
         })
         .child(label.to_string())
 }

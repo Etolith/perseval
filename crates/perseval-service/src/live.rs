@@ -22,7 +22,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::analyzer::{CohortControlHandle, spawn_analysis_worker};
-use crate::assessments::{TaskCompletionAssessmentExecutor, spawn_assessment_worker};
+use crate::assessments::{
+    LocalTaskCompletionModelV1, TaskCompletionAssessmentExecutor, spawn_assessment_worker,
+};
 use crate::config::PersevalConfigV1;
 use crate::jobs::spawn_candidate_job_worker;
 use crate::supervision::{WorkerGroup, WorkerSupervisor};
@@ -37,7 +39,7 @@ mod writer;
 
 use writer::writer_loop;
 
-pub use assessments::TaskCompletionQualityCheckDraftV1;
+pub use assessments::{TaskCompletionExecutionRouteV1, TaskCompletionQualityCheckDraftV1};
 
 #[derive(Debug, Clone)]
 pub struct TraceSnapshot {
@@ -543,6 +545,7 @@ pub struct LiveTraceService {
     hub: Arc<DeltaHub>,
     workers: WorkerSupervisor,
     cohort_control: Option<CohortControlHandle>,
+    local_task_completion_model: Option<LocalTaskCompletionModelV1>,
     openai_health: crate::analyzer::OpenAiHealthHandle,
     analysis_shutdown: Arc<AtomicBool>,
     candidate_job_shutdown: Arc<AtomicBool>,
@@ -555,11 +558,12 @@ impl LiveTraceService {
         // Validate configured local artifacts and construct provider runtimes
         // before any background thread is started. Startup is all-or-nothing
         // for learned assessment dependencies.
-        let assessment_executor = TaskCompletionAssessmentExecutor::configured(
-            store.clone(),
-            config.assessments.local_model_artifact_dir.as_deref(),
-        )
-        .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
+        let (assessment_executor, local_task_completion_model) =
+            TaskCompletionAssessmentExecutor::configured_with_model(
+                store.clone(),
+                config.assessments.local_model_artifact_dir.as_deref(),
+            )
+            .map_err(|error| LiveServiceError::Writer(error.to_string()))?;
         let (sender, receiver) = mpsc::sync_channel(config.stream.queue_batches);
         let hub = Arc::new(DeltaHub::default());
         let (accepted_spans, rejected_spans) = store.source_totals(&config.otlp.source_id)?;
@@ -651,6 +655,7 @@ impl LiveTraceService {
             hub,
             workers,
             cohort_control: analysis_worker.cohort_control,
+            local_task_completion_model,
             openai_health: analysis_worker.openai_health,
             analysis_shutdown,
             candidate_job_shutdown: candidate_worker.shutdown,
@@ -659,6 +664,12 @@ impl LiveTraceService {
 
     pub fn ingest_handle(&self) -> LiveIngestHandle {
         self.ingest.clone()
+    }
+
+    /// Returns the exact artifact identity verified before workers started.
+    /// Absence means local learned assessment is unavailable in this process.
+    pub fn local_task_completion_model(&self) -> Option<LocalTaskCompletionModelV1> {
+        self.local_task_completion_model.clone()
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectV1>, LiveServiceError> {

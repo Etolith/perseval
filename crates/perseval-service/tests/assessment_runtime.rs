@@ -11,7 +11,10 @@ use perseval_service::assessments::{
     FoundationAssessmentExecutor, LearnedAssessmentExecutor, TaskCompletionAssessmentExecutor,
     TaskCompletionEvaluationRunner,
 };
-use perseval_service::{LiveTraceService, PersevalConfigV1, TaskCompletionQualityCheckDraftV1};
+use perseval_service::{
+    LiveTraceService, PersevalConfigV1, TaskCompletionExecutionRouteV1,
+    TaskCompletionQualityCheckDraftV1,
+};
 use perseval_store::{
     ANNOTATION_SCHEMA_RELEASE_SCHEMA_VERSION, ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION,
     AnnotationLabelV1, AnnotationSchemaReleaseV1, AssessmentCommitV1, AssessmentItemStatusV1,
@@ -2581,6 +2584,7 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
     let quality_check = TaskCompletionQualityCheckDraftV1 {
         name: "Checkout task completion".into(),
         review_criteria: "Return completed, partial, failed, or abstain. Cite every criterion decision to exact observed trace evidence.".into(),
+        execution_route: TaskCompletionExecutionRouteV1::HostedOpenAi,
         requested_model: "gpt-4.1-mini".into(),
         context_release_id: release_id,
         applicable_taxonomy_node_ids: taxonomy
@@ -2609,6 +2613,21 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
             .unwrap_err()
             .to_string()
             .contains("taxonomy node")
+    );
+    let mut unavailable_local_quality_check = quality_check.clone();
+    unavailable_local_quality_check.execution_route = TaskCompletionExecutionRouteV1::LocalOnnx;
+    let local_error = service
+        .publish_task_completion_quality_check(
+            "checkout",
+            &unavailable_local_quality_check,
+            "qa-reviewer",
+            ReviewAuthorityV1::Human,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        local_error.contains("no verified local task-completion model is configured"),
+        "local publication must fail closed instead of falling back to OpenAI: {local_error}"
     );
     assert!(
         service
@@ -2681,6 +2700,15 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
             .map(Vec::len),
         Some(1),
         "a sourced purpose must yield a reviewable fallback task when headings are absent"
+    );
+    assert_eq!(
+        fallback
+            .proposed_context
+            .pointer("/intent/success_criteria")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(1),
+        "a repository without an explicit heading still needs a conservative, human-reviewable completion criterion"
     );
     service.shutdown();
 }

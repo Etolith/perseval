@@ -85,8 +85,13 @@ explicit human approval.
 Run a versioned Task Completion review over finalized trace revisions without
 turning model output into a deterministic finding. The native **Evals**
 workspace separates the quality check definition, bounded backfill preview,
-provider execution, human review, and calibration policy so each artifact keeps
+local or hosted execution, human review, and calibration policy so each artifact keeps
 its own immutable provenance.
+
+A verified development model can be selected under **Settings → AI features**
+and then run with **On this Mac** in Quality checks. Perseval binds
+the published release to the artifact hashes verified at startup and never
+falls back to a hosted provider when local verification or inference fails.
 
 **Review Queue** supports two intentionally different workflows. Blind
 calibration seals the automated output and peer answers until the reviewer has

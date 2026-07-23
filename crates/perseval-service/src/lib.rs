@@ -15,13 +15,14 @@ pub mod runtime;
 mod supervision;
 mod topology;
 
+pub use assessments::LocalTaskCompletionModelV1;
 pub use config::{
     AssessmentConfig, ConfigError, McpConfig, OpenAiAnalysisConfig, PersevalConfigV1,
 };
 pub use live::{
     BlobPreviewV1, ComparisonCancellationToken, LiveServiceError, LiveTraceService,
-    SubscriptionError, TaskCompletionQualityCheckDraftV1, TraceFileImportResultV1, TraceSnapshot,
-    TraceSubscription,
+    SubscriptionError, TaskCompletionExecutionRouteV1, TaskCompletionQualityCheckDraftV1,
+    TraceFileImportResultV1, TraceSnapshot, TraceSubscription,
 };
 pub use perseval_store::{
     ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION, AdjudicationV1, AgentContextDraftV1,
