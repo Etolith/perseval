@@ -275,7 +275,7 @@ pub(crate) fn spawn_analysis_worker(
     let openai_configured = openai_key_available();
     if openai_enabled && !openai_configured {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::InvalidInput,
             "OpenAI analysis is enabled but OPENAI_API_KEY is unavailable",
         ));
     }

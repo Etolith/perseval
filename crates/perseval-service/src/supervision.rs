@@ -90,14 +90,18 @@ impl WorkerSupervisor {
             *workers = retained;
             finished
         };
+        let new_failures = finished
+            .into_iter()
+            .map(|worker| {
+                if worker.handle.join().is_err() {
+                    format!("{} panicked", worker.name)
+                } else {
+                    format!("{} exited", worker.name)
+                }
+            })
+            .collect::<Vec<_>>();
         let mut failures = self.failures.lock().expect("worker failure lock poisoned");
-        failures.extend(finished.into_iter().map(|worker| {
-            if worker.handle.join().is_err() {
-                format!("{} panicked", worker.name)
-            } else {
-                format!("{} exited", worker.name)
-            }
-        }));
+        failures.extend(new_failures);
         failures.clone()
     }
 }
