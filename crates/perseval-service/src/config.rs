@@ -130,6 +130,10 @@ pub struct AssessmentConfig {
     pub enabled: bool,
     pub poll_interval_ms: u64,
     pub estimated_attempt_cost_micros: u64,
+    /// Directory containing a verified task-completion ONNX artifact. When
+    /// absent, local-classifier releases fail closed instead of falling back
+    /// to a cloud evaluator.
+    pub local_model_artifact_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +286,7 @@ impl Default for AssessmentConfig {
             enabled: true,
             poll_interval_ms: 100,
             estimated_attempt_cost_micros: 0,
+            local_model_artifact_dir: None,
         }
     }
 }

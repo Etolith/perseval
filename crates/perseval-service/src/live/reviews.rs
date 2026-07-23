@@ -26,7 +26,8 @@ impl LiveTraceService {
         for check in checks {
             let assessments = self
                 .store
-                .list_reviewable_assessments(project_id, &check.config.evaluator_release_id)?;
+                .reviews()
+                .reviewable_assessments(project_id, &check.config.evaluator_release_id)?;
             if !assessments.is_empty() {
                 selected = Some((check.config.evaluator_release_id, assessments));
                 break;
@@ -62,7 +63,8 @@ impl LiveTraceService {
             .map(|assessment| {
                 let leakage_group_id = self
                     .store
-                    .review_leakage_group_id(&assessment.logical_trace_id, assessment.revision)?;
+                    .reviews()
+                    .leakage_group_id(&assessment.logical_trace_id, assessment.revision)?;
                 Ok((assessment, leakage_group_id))
             })
             .collect::<Result<Vec<_>, LiveServiceError>>()?;
@@ -104,7 +106,10 @@ impl LiveTraceService {
                     .count();
                 return Ok((queue, task_count));
             }
-            let frozen_split = self.store.review_split_release(&queue.split_release_id)?;
+            let frozen_split = self
+                .store
+                .reviews()
+                .split_release(&queue.split_release_id)?;
             if pending.iter().all(|(_, leakage_group_id)| {
                 frozen_split
                     .group_assignments
@@ -500,7 +505,7 @@ impl LiveTraceService {
         &self,
         project_id: &str,
     ) -> Result<Vec<ReviewQueueV1>, LiveServiceError> {
-        Ok(self.store.list_review_queues(project_id)?)
+        Ok(self.store.reviews().queues(project_id)?)
     }
 
     pub fn list_review_tasks(
@@ -508,7 +513,7 @@ impl LiveTraceService {
         project_id: &str,
         mode: Option<ReviewModeV1>,
     ) -> Result<Vec<ReviewTaskV1>, LiveServiceError> {
-        Ok(self.store.list_review_tasks(project_id, mode)?)
+        Ok(self.store.reviews().tasks(project_id, mode)?)
     }
 
     pub fn list_calibration_releases(
