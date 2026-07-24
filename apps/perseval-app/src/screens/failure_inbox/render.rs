@@ -10,6 +10,24 @@ const FAILURE_COLUMNS: [DataColumn; 6] = [
     DataColumn::Fixed(124.),
 ];
 
+fn review_summary(unreviewed: u64, confirmed: u64, dismissed: u64) -> String {
+    let mut parts = Vec::new();
+    if unreviewed > 0 {
+        parts.push(format!("{unreviewed} to review"));
+    }
+    if confirmed > 0 {
+        parts.push(format!("{confirmed} confirmed"));
+    }
+    if dismissed > 0 {
+        parts.push(format!("{dismissed} dismissed"));
+    }
+    if parts.is_empty() {
+        "No reviews".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 impl FailureInbox {
     fn render_group_row(
         &self,
@@ -246,14 +264,6 @@ impl FailureInbox {
                         )
                     },
                 )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(Theme::DIM)
-                        .child("Open →"),
-                )
                 .into_any_element(),
             tag(
                 &format!("{:?}", group.severity),
@@ -268,9 +278,10 @@ impl FailureInbox {
             div()
                 .text_xs()
                 .text_color(Theme::MUTED)
-                .child(format!(
-                    "{} unreviewed · {} dismissed",
-                    group.unreviewed_count, group.dismissed_count
+                .child(review_summary(
+                    group.unreviewed_count,
+                    group.confirmed_count,
+                    group.dismissed_count,
                 ))
                 .into_any_element(),
             div()
@@ -533,7 +544,7 @@ impl FailureInbox {
                     .child(
                         data_page_header(
                             "Failure Inbox",
-                            "Ranked groups of related failures, ready for investigation.",
+                            "Related failures, ranked for review.",
                             format!(
                                 "{} of {} groups loaded · {} selected{}",
                                 self.groups.len(),
@@ -1038,7 +1049,7 @@ fn display_timestamp(value: &str) -> String {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use super::{display_timestamp, empty_failure_groups_message};
+    use super::{display_timestamp, empty_failure_groups_message, review_summary};
 
     #[test]
     fn otlp_nanoseconds_and_rfc3339_are_humanized() {
@@ -1059,5 +1070,15 @@ mod timestamp_tests {
             empty_failure_groups_message(false, false, 1),
             "No actionable groups. Recovered errors and completed runs remain in Runs for review."
         );
+    }
+
+    #[test]
+    fn review_summary_hides_zero_value_noise() {
+        assert_eq!(review_summary(24, 0, 0), "24 to review");
+        assert_eq!(
+            review_summary(2, 3, 1),
+            "2 to review · 3 confirmed · 1 dismissed"
+        );
+        assert_eq!(review_summary(0, 0, 0), "No reviews");
     }
 }

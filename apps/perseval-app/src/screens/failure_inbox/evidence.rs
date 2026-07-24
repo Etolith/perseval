@@ -23,7 +23,7 @@ struct EvidenceGraphRow<'a> {
     index: usize,
     total: usize,
     role: &'a str,
-    explanation: &'a str,
+    explanation: Option<&'a str>,
     highlighted: bool,
     selected: bool,
     compact: bool,
@@ -48,6 +48,7 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
     };
     let execution_role = full_trace_role(span);
     let execution_badge = execution_tag(&execution_role, execution_role_for_span(span));
+    let row_padding = if explanation.is_some() { 12. } else { 8. };
     let supporting_tint = if selected || highlighted {
         Theme::MUTED
     } else {
@@ -60,7 +61,7 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
     );
     div()
         .w_full()
-        .min_h(px(64.))
+        .min_h(px(if explanation.is_some() { 64. } else { 52. }))
         .flex()
         .items_stretch()
         .border_b_1()
@@ -81,7 +82,7 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
                 .justify_center()
                 .child(
                     div()
-                        .mt_3()
+                        .mt(px(row_padding))
                         .size(px(20.))
                         .rounded_full()
                         .border_1()
@@ -117,7 +118,7 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
             div()
                 .min_w_0()
                 .flex_1()
-                .py_3()
+                .py(px(row_padding))
                 .pr_3()
                 .child(
                     div()
@@ -139,13 +140,15 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
                             execution_tag(role, ExecutionRole::Evidence)
                         }),
                 )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(supporting_tint)
-                        .child(explanation.to_string()),
-                )
+                .when_some(explanation, |content, explanation| {
+                    content.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(supporting_tint)
+                            .child(explanation.to_string()),
+                    )
+                })
                 .when(compact, |content| {
                     content.child(
                         div()
@@ -165,7 +168,7 @@ fn evidence_graph_row(span: &SpanRow, row: EvidenceGraphRow<'_>) -> Div {
                 div()
                     .w(px(170.))
                     .flex_none()
-                    .py_3()
+                    .py(px(row_padding))
                     .pr_3()
                     .text_right()
                     .text_xs()
@@ -602,7 +605,7 @@ impl FailureInbox {
             if let Some(presentation) = evidence.presentation.as_ref() {
                 let impact = self.selected_group.as_ref().map(|group| {
                     format!(
-                        "{:?} severity · {} occurrences across {} runs",
+                        "{:?} · {} occurrences · {} runs",
                         group.summary.severity,
                         group.summary.occurrence_count,
                         group.summary.affected_run_count
@@ -613,11 +616,10 @@ impl FailureInbox {
                         .id("failure-diagnosis")
                         .role(Role::Status)
                         .aria_label(format!(
-                            "Diagnosis: {} Expected: {} Observed: {} Recovery: {}",
+                            "Finding: {} Why: {} Next: {}",
                             presentation.diagnosis,
-                            presentation.expected_behavior,
                             presentation.observed_behavior,
-                            presentation.recovery_summary
+                            presentation.remediation_hint
                         ))
                         .p_4()
                         .rounded(px(6.))
@@ -626,10 +628,22 @@ impl FailureInbox {
                         .bg(Theme::INSET_SURFACE)
                         .child(
                             div()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(Theme::CYAN)
-                                .child("DIAGNOSIS"),
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::CYAN)
+                                        .child("FINDING"),
+                                )
+                                .when_some(impact, |header, impact| {
+                                    header.child(
+                                        div().text_xs().text_color(Theme::MUTED).child(impact),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -639,46 +653,78 @@ impl FailureInbox {
                                 .child(presentation.diagnosis.clone()),
                         )
                         .child(
-                            div()
-                                .mt_4()
-                                .grid()
-                                .grid_cols(if compact { 1 } else { 2 })
-                                .gap_3()
-                                .child(diagnosis_fact(
-                                    "Expected",
-                                    &presentation.expected_behavior,
-                                    Theme::GREEN,
-                                ))
-                                .child(diagnosis_fact(
-                                    "Observed",
-                                    &presentation.observed_behavior,
-                                    Theme::AMBER,
-                                )),
+                            diagnosis_fact("Why", &presentation.observed_behavior, Theme::AMBER)
+                                .mt_3(),
                         )
-                        .when_some(impact, |card, impact| {
-                            card.child(diagnosis_fact("Impact", &impact, Theme::RED).mt_3())
-                        })
-                        .child(
-                            diagnosis_fact(
-                                "Recovery",
-                                &presentation.recovery_summary,
-                                Theme::MUTED,
-                            )
-                            .mt_3(),
-                        )
-                        .when_some(presentation.caveat.as_ref(), |card, caveat| {
-                            card.child(diagnosis_fact("Caveat", caveat, Theme::AMBER).mt_3())
-                        })
                         .child(
                             diagnosis_fact("Next", &presentation.remediation_hint, Theme::CYAN)
                                 .mt_3(),
-                        ),
+                        )
+                        .child(
+                            div().mt_3().flex().child(
+                                button(
+                                    if self.diagnosis_details_open {
+                                        "Hide details"
+                                    } else {
+                                        "Show details"
+                                    },
+                                    self.diagnosis_details_open,
+                                )
+                                .id("diagnosis-details")
+                                .role(Role::Button)
+                                .aria_label(if self.diagnosis_details_open {
+                                    "Hide expected behavior and recovery details"
+                                } else {
+                                    "Show expected behavior and recovery details"
+                                })
+                                .aria_expanded(self.diagnosis_details_open)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.toggle_diagnosis_details(cx)),
+                                ),
+                            ),
+                        )
+                        .when(self.diagnosis_details_open, |card| {
+                            card.child(
+                                div()
+                                    .mt_3()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(Theme::BORDER)
+                                    .grid()
+                                    .grid_cols(if compact { 1 } else { 2 })
+                                    .gap_3()
+                                    .child(diagnosis_fact(
+                                        "Expected",
+                                        &presentation.expected_behavior,
+                                        Theme::GREEN,
+                                    ))
+                                    .child(diagnosis_fact(
+                                        "Recovery",
+                                        &presentation.recovery_summary,
+                                        Theme::MUTED,
+                                    ))
+                                    .when_some(presentation.caveat.as_ref(), |details, caveat| {
+                                        details.child(diagnosis_fact(
+                                            "Caveat",
+                                            caveat,
+                                            Theme::AMBER,
+                                        ))
+                                    }),
+                            )
+                        }),
                 );
             }
+            let evidence_count = evidence
+                .spans
+                .iter()
+                .filter(|span| evidence.evidence_span_ids.contains(&span.span_id))
+                .count();
+            let context_count = evidence.spans.len().saturating_sub(evidence_count);
             body = body
                 .child(
                     div()
                         .mt_5()
+                        .mb_3()
                         .flex()
                         .items_center()
                         .justify_between()
@@ -693,20 +739,8 @@ impl FailureInbox {
                                 .text_xs()
                                 .text_color(Theme::MUTED)
                                 .child(format!(
-                                    "{} evidence · {} with context",
-                                    evidence.evidence_span_ids.len(),
-                                    evidence.spans.len()
+                                    "{evidence_count} key steps · {context_count} surrounding"
                                 )),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt_1()
-                        .mb_3()
-                        .text_xs()
-                        .text_color(Theme::DIM)
-                        .child(
-                            "Ordered by execution time. Each highlighted step explains why the detector used it; context stays visible without exposing payloads.",
                         ),
                 )
                 .when(evidence.spans.is_empty(), |view| {
@@ -764,13 +798,30 @@ impl FailureInbox {
                 });
                 let explanation = presented_evidence
                     .map(|presented| presented.explanation.as_str())
-                    .unwrap_or(if highlighted {
-                        "This step is direct finding evidence."
-                    } else {
-                        "Execution context around the finding."
-                    });
+                    .filter(|explanation| !explanation.trim().is_empty());
                 let focused = self.focused_span_id.as_deref() == Some(&span.span_id);
                 let span_id = span.span_id.clone();
+                let accessibility_label = explanation.map_or_else(
+                    || {
+                        format!(
+                            "Step {}; {}; {}; {:.1} milliseconds",
+                            index + 1,
+                            span.name,
+                            span.category,
+                            span.duration_nano as f64 / 1_000_000.
+                        )
+                    },
+                    |explanation| {
+                        format!(
+                            "Step {}; {}; {}; {:.1} milliseconds; {}",
+                            index + 1,
+                            span.name,
+                            span.category,
+                            span.duration_nano as f64 / 1_000_000.,
+                            explanation
+                        )
+                    },
+                );
                 body = body.child(
                     evidence_graph_row(
                         span,
@@ -786,14 +837,7 @@ impl FailureInbox {
                     )
                     .id(("evidence-span", index))
                     .role(Role::ListBoxOption)
-                    .aria_label(format!(
-                        "Step {}; {}; {}; {:.1} milliseconds; {}",
-                        index + 1,
-                        span.name,
-                        span.category,
-                        span.duration_nano as f64 / 1_000_000.,
-                        explanation
-                    ))
+                    .aria_label(accessibility_label)
                     .aria_selected(focused)
                     .tab_index(0)
                     .focus_visible(|style| style.border_2().border_color(Theme::CYAN))

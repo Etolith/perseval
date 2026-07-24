@@ -222,6 +222,7 @@ impl FailureInbox {
                 focused_span_snapshot: None,
                 focused_review_evidence: None,
                 group_details_open: false,
+                diagnosis_details_open: false,
                 investigation_actions_open: false,
                 finding_review_open: false,
                 compare_base_finding_id: None,
@@ -445,6 +446,11 @@ impl FailureInbox {
             self.inspector_open = false;
             self.emit_inspector_preference(cx);
         }
+        cx.notify();
+    }
+
+    fn toggle_diagnosis_details(&mut self, cx: &mut Context<Self>) {
+        self.diagnosis_details_open = !self.diagnosis_details_open;
         cx.notify();
     }
 
