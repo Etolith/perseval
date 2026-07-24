@@ -96,16 +96,15 @@ pub(crate) fn data_columns(layout: &[DataColumn], cells: Vec<AnyElement>) -> Div
         .flex()
         .items_center()
         .gap(px(Spacing::MD))
-        .children(
-            layout
-                .iter()
-                .copied()
-                .zip(cells)
-                .map(|(width, cell)| match width {
-                    DataColumn::Flexible => div().flex_1().min_w_0().child(cell),
-                    DataColumn::Fixed(width) => {
-                        div().w(px(width)).flex_none().min_w_0().child(cell)
-                    }
-                }),
-        )
+        .children(layout.iter().copied().zip(cells).map(|(width, cell)| {
+            match width {
+                DataColumn::Flexible => div().flex_1().min_w_0().overflow_hidden().child(cell),
+                DataColumn::Fixed(width) => div()
+                    .w(px(width))
+                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(cell),
+            }
+        }))
 }

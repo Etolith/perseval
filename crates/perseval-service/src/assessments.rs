@@ -18,7 +18,7 @@ use traces_to_evals::{
     LearnedAbstentionReasonV1, LearnedEvaluationV1, LearnedVerdictV1,
     OpenAiTaskCompletionEvaluator, ProviderExecutionFailureV1, ProviderExecutionStageV1,
     ProviderResponseEnvelopeV1, TaskCompletionExecutionV1, TaskCompletionProjectionV1,
-    TraceContextBindingV1, TraceFactStatusV1,
+    TaskCompletionTraceFactV1, TraceContextBindingV1, TraceFactKindV1, TraceFactStatusV1,
 };
 
 use crate::config::AssessmentConfig;
@@ -217,45 +217,36 @@ impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
         }
         let decision = runtime.decide_projection(&compact)?;
         let probability = f64::from(decision.calibrated_probability_complete);
-        let (verdict, label, explanation) = match decision.label {
-            TaskCompletionLabelV1::Complete => (
-                LearnedVerdictV1::Pass,
-                "complete",
-                "The local learned judge found sufficient evidence that the requested task was completed.",
-            ),
-            TaskCompletionLabelV1::Incomplete => (
-                LearnedVerdictV1::Fail,
-                "incomplete",
-                "The local learned judge found that completion was unsupported or incomplete.",
-            ),
+        let (verdict, label) = match decision.label {
+            TaskCompletionLabelV1::Complete => (LearnedVerdictV1::Pass, "complete"),
+            TaskCompletionLabelV1::Incomplete => (LearnedVerdictV1::Fail, "incomplete"),
         };
-        let evidence =
-            if verdict == LearnedVerdictV1::Fail {
-                compact
-                    .facts
-                    .iter()
-                    .filter(|fact| fact.mandatory && fact.status != TraceFactStatusV1::Succeeded)
-                    .chain(compact.facts.iter().filter(|fact| {
-                        fact.mandatory && fact.status == TraceFactStatusV1::Succeeded
-                    }))
-                    .chain(compact.facts.iter().filter(|fact| !fact.mandatory))
-                    .find_map(|fact| {
-                        projection
-                            .evidence_catalog
-                            .entries
-                            .get(&fact.evidence_key)
-                            .map(|record| EvaluationEvidenceCitationV1 {
-                                evidence_key: fact.evidence_key.clone(),
-                                evidence_kind: record.evidence_kind,
-                                location: record.location.clone(),
-                                criterion_id: None,
-                            })
+        let cited_fact = compact
+            .facts
+            .iter()
+            .filter(|fact| {
+                projection
+                    .evidence_catalog
+                    .entries
+                    .contains_key(&fact.evidence_key)
+            })
+            .min_by_key(|fact| local_evidence_priority(decision.label, fact));
+        let explanation = local_decision_explanation(decision.label, cited_fact);
+        let evidence = cited_fact
+            .and_then(|fact| {
+                projection
+                    .evidence_catalog
+                    .entries
+                    .get(&fact.evidence_key)
+                    .map(|record| EvaluationEvidenceCitationV1 {
+                        evidence_key: fact.evidence_key.clone(),
+                        evidence_kind: record.evidence_kind,
+                        location: record.location.clone(),
+                        criterion_id: None,
                     })
-                    .into_iter()
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            })
+            .into_iter()
+            .collect();
         let evaluation = LearnedEvaluationV1 {
             schema_version: LEARNED_EVALUATION_SCHEMA_VERSION.into(),
             evaluator_release_id: evaluator_release.release_id()?,
@@ -267,7 +258,7 @@ impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
             label: Some(label.into()),
             score: Some(probability),
             model_reported_confidence: Some(probability.max(1.0 - probability)),
-            explanation: explanation.into(),
+            explanation,
             evidence,
             criteria: Vec::new(),
             abstention_reason: None,
@@ -278,6 +269,133 @@ impl TaskCompletionEvaluationRunner for LocalOnnxTaskCompletionRunner {
             provider: None,
         })
     }
+}
+
+fn local_evidence_priority(
+    label: TaskCompletionLabelV1,
+    fact: &TaskCompletionTraceFactV1,
+) -> (u8, u8, u8, std::cmp::Reverse<u32>) {
+    let status = match label {
+        TaskCompletionLabelV1::Complete => match fact.status {
+            TraceFactStatusV1::Succeeded => 0,
+            TraceFactStatusV1::Unknown => 2,
+            TraceFactStatusV1::Running => 3,
+            TraceFactStatusV1::Failed | TraceFactStatusV1::Cancelled => 4,
+        },
+        TaskCompletionLabelV1::Incomplete => match fact.status {
+            TraceFactStatusV1::Failed | TraceFactStatusV1::Cancelled => 0,
+            TraceFactStatusV1::Unknown | TraceFactStatusV1::Running => 1,
+            TraceFactStatusV1::Succeeded => 3,
+        },
+    };
+    let kind = match label {
+        TaskCompletionLabelV1::Complete => match fact.kind {
+            TraceFactKindV1::Verification => 0,
+            TraceFactKindV1::ArtifactMutation | TraceFactKindV1::ExternalAction => 1,
+            TraceFactKindV1::ToolResult | TraceFactKindV1::ChildAgentResult => 2,
+            _ => 3,
+        },
+        TaskCompletionLabelV1::Incomplete => match fact.kind {
+            TraceFactKindV1::Error | TraceFactKindV1::Verification => 0,
+            TraceFactKindV1::Cancellation => 1,
+            TraceFactKindV1::ToolResult | TraceFactKindV1::ChildAgentResult => 2,
+            _ => 3,
+        },
+    };
+    (
+        status,
+        u8::from(!fact.mandatory),
+        kind,
+        std::cmp::Reverse(fact.sequence),
+    )
+}
+
+fn local_decision_explanation(
+    label: TaskCompletionLabelV1,
+    fact: Option<&TaskCompletionTraceFactV1>,
+) -> String {
+    let Some(fact) = fact else {
+        return match label {
+            TaskCompletionLabelV1::Complete => {
+                "Perseval found enough trace evidence to support completion.".into()
+            }
+            TaskCompletionLabelV1::Incomplete => {
+                "Perseval could not verify completion from the trace evidence available.".into()
+            }
+        };
+    };
+    let summary = local_fact_summary(fact);
+    match label {
+        TaskCompletionLabelV1::Complete => format!(
+            "Perseval marked this task complete. Review this related trace step: “{summary}”."
+        ),
+        TaskCompletionLabelV1::Incomplete
+            if matches!(
+                fact.status,
+                TraceFactStatusV1::Failed | TraceFactStatusV1::Cancelled
+            ) =>
+        {
+            format!(
+                "Perseval marked this task incomplete. This related trace step did not succeed: “{summary}”."
+            )
+        }
+        TaskCompletionLabelV1::Incomplete => format!(
+            "Perseval marked this task incomplete. Review this related trace step: “{summary}”."
+        ),
+    }
+}
+
+fn local_fact_summary(fact: &TaskCompletionTraceFactV1) -> String {
+    let summary = bounded_evidence_summary(&fact.summary);
+    let generic = matches!(
+        summary.to_ascii_lowercase().as_str(),
+        "success" | "succeeded" | "ok" | "completed" | "done" | "failure" | "failed" | "error"
+    );
+    if !generic {
+        return summary;
+    }
+    let subject = fact
+        .tool_name
+        .as_deref()
+        .unwrap_or_else(|| local_fact_kind_label(fact.kind));
+    format!("{subject} {}", local_fact_status_label(fact.status))
+}
+
+fn local_fact_kind_label(kind: TraceFactKindV1) -> &'static str {
+    match kind {
+        TraceFactKindV1::UserRequest | TraceFactKindV1::UserClarification => "user request",
+        TraceFactKindV1::AssistantMessage => "assistant response",
+        TraceFactKindV1::ToolCall | TraceFactKindV1::ToolResult => "tool step",
+        TraceFactKindV1::Error => "error",
+        TraceFactKindV1::Verification => "verification",
+        TraceFactKindV1::ArtifactMutation => "artifact change",
+        TraceFactKindV1::ExternalAction => "external action",
+        TraceFactKindV1::ChildAgentStart | TraceFactKindV1::ChildAgentResult => "child agent",
+        TraceFactKindV1::Cancellation => "cancellation",
+    }
+}
+
+fn local_fact_status_label(status: TraceFactStatusV1) -> &'static str {
+    match status {
+        TraceFactStatusV1::Unknown => "has no recorded outcome",
+        TraceFactStatusV1::Running => "was still running",
+        TraceFactStatusV1::Succeeded => "succeeded",
+        TraceFactStatusV1::Failed => "failed",
+        TraceFactStatusV1::Cancelled => "was cancelled",
+    }
+}
+
+fn bounded_evidence_summary(summary: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact.trim_end_matches(['.', '!', '?']).to_string();
+    }
+    let mut bounded = compact.chars().take(MAX_CHARS - 1).collect::<String>();
+    if let Some(index) = bounded.rfind(char::is_whitespace) {
+        bounded.truncate(index);
+    }
+    format!("{}…", bounded.trim_end_matches(['.', '!', '?', ',']))
 }
 
 pub struct ConfiguredTaskCompletionRunner {
@@ -447,7 +565,13 @@ impl LearnedAssessmentExecutor for TaskCompletionAssessmentExecutor {
                 &config,
                 started,
             ),
-            Err(error) => task_completion_error_commit(claim, &projection, &config, error, started),
+            Err(error) => {
+                eprintln!(
+                    "task-completion evaluation failed for {} revision {}: {error:#}",
+                    claim.logical_trace_id, claim.revision
+                );
+                task_completion_error_commit(claim, &projection, &config, error, started)
+            }
         }
     }
 }
@@ -738,5 +862,100 @@ fn non_executable_commit(status: AssessmentItemStatusV1, explanation: &str) -> A
             .into(),
         ),
         error_message: Some(explanation.into()),
+    }
+}
+
+#[cfg(test)]
+mod local_explanation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use traces_to_evals::{TaskCompletionEvidenceLaneV1, TraceFactActorV1, TraceFactKindV1};
+
+    fn fact(
+        kind: TraceFactKindV1,
+        status: TraceFactStatusV1,
+        mandatory: bool,
+        sequence: u32,
+        summary: &str,
+    ) -> TaskCompletionTraceFactV1 {
+        TaskCompletionTraceFactV1 {
+            evidence_id: format!("E{:04}", sequence + 1),
+            evidence_key: format!("evidence-{sequence}"),
+            sequence,
+            actor: TraceFactActorV1::Tool,
+            kind,
+            status,
+            lane: if mandatory {
+                TaskCompletionEvidenceLaneV1::Mandatory
+            } else {
+                TaskCompletionEvidenceLaneV1::GoalRelevant
+            },
+            mandatory,
+            span_id: Some(format!("span-{sequence}")),
+            parent_span_id: None,
+            tool_name: Some("test".into()),
+            summary: summary.into(),
+            structured_facts: BTreeMap::new(),
+            token_count: 1,
+        }
+    }
+
+    #[test]
+    fn incomplete_explanation_names_the_failed_trace_step() {
+        let failed = fact(
+            TraceFactKindV1::Verification,
+            TraceFactStatusV1::Failed,
+            true,
+            4,
+            "cargo test failed: one authentication test still fails.",
+        );
+        let explanation =
+            local_decision_explanation(TaskCompletionLabelV1::Incomplete, Some(&failed));
+        assert_eq!(
+            explanation,
+            "Perseval marked this task incomplete. This related trace step did not succeed: “cargo test failed: one authentication test still fails”."
+        );
+    }
+
+    #[test]
+    fn decision_evidence_prefers_outcome_proof_over_assistant_claims() {
+        let claim = fact(
+            TraceFactKindV1::AssistantMessage,
+            TraceFactStatusV1::Succeeded,
+            true,
+            9,
+            "Done.",
+        );
+        let verification = fact(
+            TraceFactKindV1::Verification,
+            TraceFactStatusV1::Succeeded,
+            true,
+            8,
+            "All 284 tests passed.",
+        );
+        assert!(
+            local_evidence_priority(TaskCompletionLabelV1::Complete, &verification)
+                < local_evidence_priority(TaskCompletionLabelV1::Complete, &claim)
+        );
+    }
+
+    #[test]
+    fn evidence_summary_is_bounded_at_a_word_boundary() {
+        let summary = "repeated evidence ".repeat(30);
+        let bounded = bounded_evidence_summary(&summary);
+        assert!(bounded.ends_with('…'));
+        assert!(bounded.chars().count() <= 240);
+    }
+
+    #[test]
+    fn generic_evidence_summary_names_the_concrete_tool_outcome() {
+        let succeeded = fact(
+            TraceFactKindV1::Verification,
+            TraceFactStatusV1::Succeeded,
+            true,
+            2,
+            "success",
+        );
+        assert_eq!(local_fact_summary(&succeeded), "test succeeded");
     }
 }

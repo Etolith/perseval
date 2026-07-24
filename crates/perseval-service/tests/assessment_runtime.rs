@@ -7,6 +7,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use perseval_model_runtime::{TASK_COMPLETION_ONNX_RUNTIME_VERSION, TaskCompletionOnnxRuntime};
 use perseval_service::assessments::{
     FoundationAssessmentExecutor, LearnedAssessmentExecutor, TaskCompletionAssessmentExecutor,
     TaskCompletionEvaluationRunner,
@@ -2710,6 +2711,14 @@ fn approved_repository_prepares_a_sourced_draft_for_human_activation() {
         Some(1),
         "a repository without an explicit heading still needs a conservative, human-reviewable completion criterion"
     );
+    let fallback_release_id = service
+        .approve_agent_context_draft(&fallback.draft_id, "qa-reviewer", ReviewAuthorityV1::Human)
+        .expect("the conservative fallback criterion must pass release validation");
+    let fallback_governance = service.agent_context_governance_summary("plain").unwrap();
+    assert_eq!(
+        fallback_governance.latest_context_release_id.as_deref(),
+        Some(fallback_release_id.as_str())
+    );
     service.shutdown();
 }
 
@@ -2908,7 +2917,7 @@ fn clean_v4_640_trace_accounting_certification() {
 /// test; an independent scorer joins the resulting export afterward through
 /// `source_id` plus `external_trace_id`.
 #[test]
-#[ignore = "requires a disposable clean-v4 workspace and OPENAI_API_KEY"]
+#[ignore = "requires a disposable clean-v4 workspace and either OPENAI_API_KEY or PERSEVAL_LOCAL_TASK_COMPLETION_ARTIFACT"]
 fn clean_v4_pv02_task_completion_certification() {
     const PROJECT_ID: &str = "arize-perseval-hf-benchmark";
     const PORTABLE_FIXTURE_HASH: &str =
@@ -2920,6 +2929,10 @@ fn clean_v4_pv02_task_completion_certification() {
         .expect("PERSEVAL_CLEAN_V4_CERT_WORKSPACE must point at a disposable workspace copy");
     let output = std::env::var("PERSEVAL_PV02_ASSESSMENT_EXPORT")
         .expect("PERSEVAL_PV02_ASSESSMENT_EXPORT must name the product export path");
+    let local_artifact = std::env::var("PERSEVAL_LOCAL_TASK_COMPLETION_ARTIFACT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from);
     let limit = std::env::var("PERSEVAL_PV02_CERT_LIMIT")
         .ok()
         .map(|value| value.parse::<usize>().unwrap())
@@ -3101,13 +3114,30 @@ fn clean_v4_pv02_task_completion_certification() {
         max_tool_observations: 256,
         max_summary_bytes: 4_096,
     };
-    let requested_model = "gpt-4.1-mini".to_string();
-    let evaluator = EvaluatorReleaseSpecV1 {
-        schema_version: EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
-        name: "LinuxArena honest task completion".into(),
-        task_kind: LearnedTaskKind::TaskCompletion,
-        target_kind: EvaluationTargetKind::TraceRevision,
-        implementation: EvaluationImplementationV1::PromptJudge {
+    let local_manifest = local_artifact.as_ref().map(|artifact| {
+        TaskCompletionOnnxRuntime::load(artifact)
+            .unwrap_or_else(|error| panic!("local certification artifact is invalid: {error}"))
+            .manifest()
+            .clone()
+    });
+    let requested_model = local_manifest
+        .as_ref()
+        .map(|manifest| manifest.model_file.sha256.clone())
+        .unwrap_or_else(|| "gpt-4.1-mini".into());
+    let implementation = if let Some(manifest) = &local_manifest {
+        EvaluationImplementationV1::LocalClassifier {
+            model_artifact_id: manifest.model_file.sha256.clone(),
+            tokenizer_artifact_id: manifest
+                .tokenizer_file
+                .as_ref()
+                .expect("local certification artifact must include a tokenizer")
+                .sha256
+                .clone(),
+            feature_schema_id: manifest.lineage.feature_set_version.clone(),
+            runtime_version: TASK_COMPLETION_ONNX_RUNTIME_VERSION.into(),
+        }
+    } else {
+        EvaluationImplementationV1::PromptJudge {
             provider: "openai".into(),
             requested_model: requested_model.clone(),
             system_prompt: TASK_COMPLETION_EVIDENCE_SYSTEM_PROMPT_V2.into(),
@@ -3116,7 +3146,18 @@ fn clean_v4_pv02_task_completion_certification() {
             decoding_parameters: BTreeMap::new(),
             parser_version: "task-completion-parser-v1".into(),
             normalizer_version: "task-completion-normalizer-v1".into(),
+        }
+    };
+    let evaluator = EvaluatorReleaseSpecV1 {
+        schema_version: EVALUATOR_RELEASE_SCHEMA_VERSION.into(),
+        name: if local_artifact.is_some() {
+            "LinuxArena local task completion certification".into()
+        } else {
+            "LinuxArena cloud task completion certification".into()
         },
+        task_kind: LearnedTaskKind::TaskCompletion,
+        target_kind: EvaluationTargetKind::TraceRevision,
+        implementation,
         projection_release_id: projector.release_id().unwrap(),
         context_projection_release_id: context_projection.release_id().unwrap(),
         applicable_taxonomy_release_id: None,
@@ -3196,7 +3237,11 @@ fn clean_v4_pv02_task_completion_certification() {
             &format!("clean-v4-pv02-certification-{limit}"),
         )
         .unwrap();
-    let executor = TaskCompletionAssessmentExecutor::openai(store.clone()).unwrap();
+    let executor = if let Some(artifact) = local_artifact.as_deref() {
+        TaskCompletionAssessmentExecutor::configured(store.clone(), Some(artifact)).unwrap()
+    } else {
+        TaskCompletionAssessmentExecutor::openai(store.clone()).unwrap()
+    };
     let timeout = Duration::from_secs(
         std::env::var("PERSEVAL_PV02_CERT_TIMEOUT_SECONDS")
             .ok()
@@ -3234,7 +3279,7 @@ fn clean_v4_pv02_task_completion_certification() {
     );
     assert!(
         export.status_counts.get("succeeded").copied().unwrap_or(0) > 0,
-        "provider-backed certification produced no scored decisions"
+        "task-completion certification produced no scored decisions"
     );
     if limit == 240 {
         assert!(

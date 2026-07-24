@@ -16,6 +16,7 @@ impl FailureInbox {
     ) {
         self.occurrence_offset = occurrence_offset;
         self.compare_base_finding_id = None;
+        self.diagnosis_details_open = false;
         self.investigation_actions_open = false;
         self.finding_review_open = false;
         self.investigation_loading = true;
@@ -96,6 +97,7 @@ impl FailureInbox {
         self.evidence_request_generation = self.evidence_request_generation.wrapping_add(1);
         let generation = self.evidence_request_generation;
         self.candidate_preview = None;
+        self.diagnosis_details_open = false;
         self.revealed_payload = None;
         let requested_finding_id = finding_id.clone();
         let task = cx.background_spawn(async move {

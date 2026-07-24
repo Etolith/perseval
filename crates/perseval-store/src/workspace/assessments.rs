@@ -1540,6 +1540,7 @@ impl WorkspaceStore {
                 &claim.item_id,
                 &claim.job_id,
                 "cancelled",
+                Some("cancelled"),
                 now,
             )?;
             transaction.commit()?;
@@ -1555,11 +1556,16 @@ impl WorkspaceStore {
             commit.charged_cost_micros,
             now,
         )?;
-        let failure_json = commit
-            .provider_failure
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
+        let failure_json = if let Some(failure) = commit.provider_failure.as_ref() {
+            Some(serde_json::to_string(failure)?)
+        } else if commit.error_code.is_some() || commit.error_message.is_some() {
+            Some(serde_json::to_string(&serde_json::json!({
+                "error_code": commit.error_code,
+                "message": commit.error_message,
+            }))?)
+        } else {
+            None
+        };
         let envelope = commit.provider_response.as_ref();
         transaction.execute(
             "UPDATE assessment_attempts SET status = ?2, retryable = ?3,
@@ -1732,6 +1738,7 @@ impl WorkspaceStore {
             &claim.item_id,
             &claim.job_id,
             item_status_name(commit.status),
+            commit.error_code.as_deref(),
             now,
         )?;
         let active_threshold_policy_id = transaction
@@ -2620,6 +2627,7 @@ fn materialize_cached_assessment(
         item_id,
         job_id,
         item_status_name(cached.status),
+        None,
         now,
     )
 }
@@ -2645,13 +2653,15 @@ fn finish_item(
     item_id: &str,
     job_id: &str,
     status: &str,
+    terminal_reason: Option<&str>,
     now: i64,
 ) -> Result<(), StoreError> {
     transaction.execute(
         "UPDATE assessment_job_items SET status = ?2, lease_owner = NULL,
-                lease_expires_at_unix_ms = NULL, updated_at_unix_ms = ?3
+                lease_expires_at_unix_ms = NULL, terminal_reason = ?3,
+                updated_at_unix_ms = ?4
          WHERE item_id = ?1",
-        params![item_id, status, now],
+        params![item_id, status, terminal_reason, now],
     )?;
     refresh_job_counts(transaction, job_id, now)
 }

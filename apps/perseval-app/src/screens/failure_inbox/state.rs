@@ -72,6 +72,7 @@ pub(crate) struct FailureInboxState {
     pub(super) focused_span_snapshot: Option<SpanRow>,
     pub(super) focused_review_evidence: Option<(String, String)>,
     pub(super) group_details_open: bool,
+    pub(super) diagnosis_details_open: bool,
     pub(super) investigation_actions_open: bool,
     pub(super) finding_review_open: bool,
     pub(super) compare_base_finding_id: Option<String>,

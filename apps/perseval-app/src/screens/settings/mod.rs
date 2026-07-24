@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -8,8 +8,9 @@ use gpui::{
 };
 use perseval_service::{
     AgentContextGovernanceSummaryV1, AssessmentRuntimeHealthV1, ContextBackfillPreviewV1,
-    LiveTraceService, OpenAiProviderHealthV1, PersevalConfigV1, ReviewAuthorityV1,
-    TaxonomyGovernanceSummaryV1,
+    LiveTraceService, ManagedTaskCompletionModelV1, OpenAiProviderHealthV1, PersevalConfigV1,
+    ReviewAuthorityV1, TaskCompletionModelCatalogV1, TaskCompletionModelManager,
+    TaxonomyGovernanceSummaryV1, inspect_managed_install, inspect_managed_model,
 };
 
 use crate::components::{TextInput, button, button_state};
@@ -82,6 +83,14 @@ impl SettingsCategory {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ModelManagementState {
+    Checking,
+    Ready,
+    Installing,
+    Failed(String),
+}
+
 pub(crate) struct SettingsScreen {
     service: Option<Arc<LiveTraceService>>,
     runtime_config: PersevalConfigV1,
@@ -95,6 +104,10 @@ pub(crate) struct SettingsScreen {
     default_preview_kib: Entity<TextInput>,
     maximum_reveal_mib: Entity<TextInput>,
     local_model_artifact_dir: Entity<TextInput>,
+    model_manager: Option<TaskCompletionModelManager>,
+    model_catalog: Option<TaskCompletionModelCatalogV1>,
+    managed_model_install: Option<ManagedTaskCompletionModelV1>,
+    model_management_state: ModelManagementState,
     openai_embedding_model: Entity<TextInput>,
     openai_chat_model: Entity<TextInput>,
     openai_health: OpenAiProviderHealthV1,
@@ -167,6 +180,39 @@ impl SettingsScreen {
             2_048,
             cx,
         );
+        let managed_model_install = config
+            .assessments
+            .local_model_artifact_dir
+            .as_deref()
+            .and_then(|path| inspect_managed_install(path).ok());
+        let model_manager = TaskCompletionModelManager::production().ok();
+        let model_management_state = if model_manager.is_some() {
+            ModelManagementState::Checking
+        } else {
+            ModelManagementState::Failed(
+                "Perseval could not locate its local model directory.".into(),
+            )
+        };
+        if let Some(manager) = model_manager.clone() {
+            let task = cx.background_spawn(async move { manager.latest_release() });
+            cx.spawn(async move |weak, cx| {
+                let result = task.await;
+                let _ = weak.update(cx, |this, cx| {
+                    match result {
+                        Ok(catalog) => {
+                            this.model_catalog = Some(catalog);
+                            this.model_management_state = ModelManagementState::Ready;
+                        }
+                        Err(error) => {
+                            this.model_management_state =
+                                ModelManagementState::Failed(error.to_string());
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         let openai_embedding_model = Self::input(
             &config.analysis.openai.embedding_model,
             "text-embedding-3-small",
@@ -201,6 +247,10 @@ impl SettingsScreen {
             default_preview_kib,
             maximum_reveal_mib,
             local_model_artifact_dir,
+            model_manager,
+            model_catalog: None,
+            managed_model_install,
+            model_management_state,
             openai_embedding_model,
             openai_chat_model,
             openai_health,
@@ -495,11 +545,29 @@ impl SettingsScreen {
         if self.preparing_context {
             return;
         }
-        let (Some(service), Some(project_id), Some(draft)) = (
-            self.service.clone(),
-            self.selected_project_id.clone(),
-            self.context_governance.latest_draft.clone(),
-        ) else {
+        let Some(service) = self.service.clone() else {
+            self.context_notice = Some((
+                "The local Perseval service is unavailable. Restart Perseval and try again.".into(),
+                Theme::RED,
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.context_notice = Some((
+                "Choose a project before approving its agent specification.".into(),
+                Theme::RED,
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(draft) = self.context_governance.latest_draft.clone() else {
+            self.context_notice = Some((
+                "This agent specification draft is no longer available. Prepare a new draft."
+                    .into(),
+                Theme::RED,
+            ));
+            cx.notify();
             return;
         };
         let reviewer = self.reviewer_ref.read(cx).text().trim().to_string();
@@ -508,38 +576,29 @@ impl SettingsScreen {
             "Activating an immutable specification release…".into(),
             Theme::CYAN,
         ));
-        let task = cx.background_spawn(async move {
-            let release_id = service.approve_agent_context_draft(
-                &draft.draft_id,
-                &reviewer,
-                ReviewAuthorityV1::Human,
-            )?;
-            let context = service.agent_context_governance_summary(&project_id)?;
-            Ok::<_, perseval_service::LiveServiceError>((release_id, context))
-        });
-        cx.spawn(async move |weak, cx| {
-            let result = task.await;
-            let _ = weak.update(cx, |this, cx| {
-                this.preparing_context = false;
-                match result {
-                    Ok((release_id, context)) => {
-                        this.context_governance = context;
-                        this.context_notice = Some((
-                            format!(
-                                "Activated immutable release {}. Configure reviewed trace-binding rules before running context-dependent evaluators.",
-                                short_identity(&release_id)
-                            ),
-                            Theme::GREEN,
-                        ));
-                    }
-                    Err(error) => {
-                        this.context_notice = Some((error.to_string(), Theme::RED));
-                    }
-                }
-                cx.notify();
+        let result = service
+            .approve_agent_context_draft(&draft.draft_id, &reviewer, ReviewAuthorityV1::Human)
+            .and_then(|release_id| {
+                service
+                    .agent_context_governance_summary(&project_id)
+                    .map(|context| (release_id, context))
             });
-        })
-        .detach();
+        self.preparing_context = false;
+        match result {
+            Ok((release_id, context)) => {
+                self.context_governance = context;
+                self.context_notice = Some((
+                    format!(
+                        "Activated immutable release {}. Configure reviewed trace-binding rules before running context-dependent evaluators.",
+                        short_identity(&release_id)
+                    ),
+                    Theme::GREEN,
+                ));
+            }
+            Err(error) => {
+                self.context_notice = Some((error.to_string(), Theme::RED));
+            }
+        }
         cx.notify();
     }
 
@@ -731,6 +790,96 @@ impl SettingsScreen {
     fn toggle_larger_reveal(&mut self, cx: &mut Context<Self>) {
         self.draft.blobs.allow_larger_local_reveal = !self.draft.blobs.allow_larger_local_reveal;
         self.save_notice = None;
+        cx.notify();
+    }
+
+    fn refresh_model_catalog(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.model_management_state,
+            ModelManagementState::Checking | ModelManagementState::Installing
+        ) {
+            return;
+        }
+        let Some(manager) = self.model_manager.clone() else {
+            self.model_management_state =
+                ModelManagementState::Failed("The local model directory is unavailable.".into());
+            cx.notify();
+            return;
+        };
+        self.model_management_state = ModelManagementState::Checking;
+        let task = cx.background_spawn(async move { manager.latest_release() });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                match result {
+                    Ok(catalog) => {
+                        this.model_catalog = Some(catalog);
+                        this.model_management_state = ModelManagementState::Ready;
+                    }
+                    Err(error) => {
+                        this.model_management_state =
+                            ModelManagementState::Failed(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn install_latest_model(&mut self, cx: &mut Context<Self>) {
+        if self.saving
+            || matches!(
+                self.model_management_state,
+                ModelManagementState::Checking | ModelManagementState::Installing
+            )
+        {
+            return;
+        }
+        let (Some(manager), Some(catalog)) =
+            (self.model_manager.clone(), self.model_catalog.clone())
+        else {
+            self.model_management_state =
+                ModelManagementState::Failed("No verified model release is available.".into());
+            cx.notify();
+            return;
+        };
+        self.model_management_state = ModelManagementState::Installing;
+        self.save_notice = Some((
+            "Downloading and verifying the local model…".into(),
+            Theme::CYAN,
+        ));
+        let task = cx.background_spawn(async move { manager.install(&catalog) });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                match result {
+                    Ok(model) => {
+                        this.model_management_state = ModelManagementState::Ready;
+                        this.managed_model_install = Some(model.clone());
+                        this.draft.assessments.enabled = true;
+                        this.draft.assessments.local_model_artifact_dir =
+                            Some(model.artifact_dir.clone());
+                        this.local_model_artifact_dir.update(cx, |input, cx| {
+                            input.set_text(model.artifact_dir.display().to_string(), cx);
+                        });
+                        this.save_notice = Some((
+                            "Model verified. Saving settings and restarting Perseval…".into(),
+                            Theme::GREEN,
+                        ));
+                        this.save_and_restart(cx);
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        this.model_management_state = ModelManagementState::Failed(message.clone());
+                        this.save_notice = Some((message, Theme::RED));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1102,25 +1251,17 @@ impl SettingsScreen {
                     .flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(
-                        button_state(
-                            if self.preparing_context {
-                                "Working…"
-                            } else {
-                                "Approve & use"
-                            },
-                            true,
-                            can_activate,
-                        )
-                        .id("approve-agent-specification")
-                        .role(Role::Button)
-                        .aria_label("Use this version for new quality checks")
-                        .when(can_activate, |button| {
-                            button.on_click(
-                                cx.listener(|this, _, _, cx| this.approve_context_draft(cx)),
-                            )
-                        }),
-                    )
+                    .child(action_button(
+                        if self.preparing_context {
+                            "Working…"
+                        } else {
+                            "Approve & use"
+                        },
+                        "Use this version for new quality checks",
+                        can_activate,
+                        true,
+                        cx.listener(|this, _, _, cx| this.approve_context_draft(cx)),
+                    ))
                     .child(action_button(
                         "Start over from repository…",
                         "Keep this draft and prepare another",
@@ -1472,20 +1613,51 @@ impl SettingsScreen {
                     .local_model_artifact_dir
                     .is_some()
                 {
-                    "Could not verify this folder".into()
+                    "Installed files could not be verified".into()
                 } else {
-                    "Not configured".into()
+                    "Not installed".into()
                 }
             },
-            |_| "Verified development model".into(),
+            |_| "Ready on this Mac".into(),
         );
-        section(
+        let update_available = self.model_catalog.as_ref().is_some_and(|catalog| {
+            self.managed_model_install
+                .as_ref()
+                .is_none_or(|installed| !installed.matches_catalog(catalog))
+        });
+        let management_status = match &self.model_management_state {
+            ModelManagementState::Checking => "Checking for an available model…".into(),
+            ModelManagementState::Ready => self.model_catalog.as_ref().map_or_else(
+                || "No downloadable release was found.".into(),
+                |catalog| {
+                    if update_available {
+                        format!("{} is available", catalog.release_version)
+                    } else {
+                        "Up to date".into()
+                    }
+                },
+            ),
+            ModelManagementState::Installing => "Downloading and verifying…".into(),
+            ModelManagementState::Failed(error) => format!("Could not check: {error}"),
+        };
+        let can_install = self.model_catalog.is_some()
+            && !self.saving
+            && !matches!(
+                self.model_management_state,
+                ModelManagementState::Checking | ModelManagementState::Installing
+            )
+            && (update_available || local_model.is_none());
+        let can_refresh = !matches!(
+            self.model_management_state,
+            ModelManagementState::Checking | ModelManagementState::Installing
+        );
+        let mut view = section(
             "Local reviews",
-            "Run Task Completion without sending trace evidence to a provider.",
+            "Check whether each run achieved what the user asked, without uploading trace evidence.",
         )
         .child(switch_row(
-            "Run reviews",
-            "Process queued quality checks on this Mac",
+            "Review new runs",
+            "Run checks in the background on this Mac",
             if self.draft.assessments.enabled {
                 "On"
             } else {
@@ -1496,54 +1668,22 @@ impl SettingsScreen {
             cx.listener(|this, _, _, cx| this.toggle_assessments(cx)),
             stack_rows,
         ))
-        .child(editable_row(
-            "Model folder",
-            "Contains manifest.json and model.onnx",
-            self.local_model_artifact_dir.clone(),
-            stack_rows,
-        ))
         .child(setting_row("Model status", local_status, stack_rows))
-        .when_some(local_model.clone(), |section, model| {
-            section
-                .child(setting_row(
-                    "Model",
-                    model.model_id.clone(),
-                    stack_rows,
-                ))
-                .child(setting_row(
-                    "Projection",
-                    model.projector_version.clone(),
-                    stack_rows,
-                ))
-                .child(setting_row(
-                    "Calibration",
-                    format!(
-                        "{} · complete at {:.3}",
-                        model.calibration_version, model.threshold_complete
-                    ),
-                    stack_rows,
-                ))
-                .child(setting_row(
-                    "Runtime",
-                    format!("{} · {}", model.feature_schema_id, model.runtime_version),
-                    stack_rows,
-                ))
-        })
+        .child(setting_row("Available model", management_status, stack_rows))
         .child(setting_row(
-            "Worker",
+            "Background work",
             if self.runtime_config.assessments.enabled {
-                format!("Ready · {} active · {} waiting", health.running, health.pending)
+                format!("{} running · {} waiting", health.running, health.pending)
             } else {
-                "Disabled in this process".into()
+                "Paused".into()
             },
             stack_rows,
         ))
         .child(setting_row(
-            "Results",
+            "Reviews",
             format!(
-                "{} total · {} succeeded · {} abstained · {} failed · {} cancelled",
+                "{} finished · {} could not decide · {} failed · {} cancelled",
                 health.terminal,
-                health.succeeded,
                 health.abstained,
                 health.failed,
                 health.cancelled
@@ -1551,44 +1691,80 @@ impl SettingsScreen {
             stack_rows,
         ))
         .child(setting_row(
-            "Skipped",
+            "Waiting for input",
             format!(
-                "{} context-unresolved · {} budget-blocked · {} privacy-blocked · {} provider-unavailable · {} not-applicable",
+                "{} missing context · {} privacy-blocked · {} unavailable · {} not applicable",
                 health.context_unresolved,
-                health.budget_blocked,
                 health.privacy_blocked,
                 health.provider_unavailable,
                 health.not_applicable
             ),
             stack_rows,
         ))
-        .child(setting_row(
-            "Time and cost",
-            format!(
-                "{} retried attempt(s) · {} total model latency · {} spent",
-                health.retry_count,
-                format_duration_ms(health.total_latency_ms),
-                format_cost_micros(health.total_cost_micros)
-            ),
-            stack_rows,
-        ))
         .child(notice(
             if local_model.is_some() {
                 "Development model"
+            } else if matches!(
+                self.model_management_state,
+                ModelManagementState::Installing
+            ) {
+                "Installing local model"
             } else {
-                "Model unavailable"
+                "Install once, then keep traces local"
             },
             if local_model.is_some() {
-                "Ready for local testing. It is not release-certified yet.".into()
+                "Ready for local testing. This preview is not release-certified yet.".into()
+            } else if matches!(
+                self.model_management_state,
+                ModelManagementState::Installing
+            ) {
+                "Perseval verifies every downloaded file before it can be used.".into()
             } else {
-                "Choose a model folder and restart. Perseval will not fall back to a hosted model.".into()
+                "Perseval downloads a hash-pinned development model, verifies every file locally, and restarts. It will not fall back to a hosted model.".into()
             },
             if local_model.is_some() {
                 Theme::CYAN
             } else {
                 Theme::AMBER
             },
-        ))
+        ));
+        view = view.child(
+            div()
+                .mt_4()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .when(update_available || local_model.is_none(), |actions| {
+                    actions.child(action_button(
+                        if matches!(
+                            self.model_management_state,
+                            ModelManagementState::Installing
+                        ) {
+                            "Installing…"
+                        } else if local_model.is_some() {
+                            "Update model & restart"
+                        } else {
+                            "Install model & restart"
+                        },
+                        "Download, verify, and use the latest local model",
+                        can_install,
+                        true,
+                        cx.listener(|this, _, _, cx| this.install_latest_model(cx)),
+                    ))
+                })
+                .child(action_button(
+                    if matches!(self.model_management_state, ModelManagementState::Checking) {
+                        "Checking…"
+                    } else {
+                        "Check for updates"
+                    },
+                    "Check the public model catalog",
+                    can_refresh,
+                    false,
+                    cx.listener(|this, _, _, cx| this.refresh_model_catalog(cx)),
+                )),
+        );
+        view
     }
 
     fn storage_section(&self, stack_rows: bool) -> impl IntoElement {
@@ -2100,42 +2276,9 @@ fn validate_local_model_folder(artifact_dir: Option<&Path>) -> Result<(), String
     let Some(artifact_dir) = artifact_dir else {
         return Ok(());
     };
-    if !artifact_dir.is_dir() {
-        return Err("Model folder does not exist or is not a directory.".into());
-    }
-
-    let manifest_path = artifact_dir.join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|_| "Model folder must contain a readable manifest.json.".to_string())?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-        .map_err(|_| "Model manifest is not valid JSON.".to_string())?;
-    for (label, pointer) in [
-        ("model", "/model_file/path"),
-        ("tokenizer", "/tokenizer_file/path"),
-    ] {
-        let relative = manifest
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_str)
-            .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| format!("Model manifest does not name a {label} file."))?;
-        let relative = Path::new(relative);
-        if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(format!("Model manifest has an unsafe {label} file path."));
-        }
-        if !artifact_dir.join(relative).is_file() {
-            return Err(format!(
-                "Model folder is missing the {label} file named by manifest.json."
-            ));
-        }
-    }
-    Ok(())
+    inspect_managed_model(artifact_dir)
+        .map(|_| ())
+        .map_err(|error| format!("Local model verification failed: {error}"))
 }
 
 fn parse_size(
@@ -2219,18 +2362,6 @@ fn taxonomy_dimension_label(
         RootCause => "Root cause",
         Severity => "Severity",
     }
-}
-
-fn format_duration_ms(value: u64) -> String {
-    if value >= 1_000 {
-        format!("{:.1}s", value as f64 / 1_000.0)
-    } else {
-        format!("{value}ms")
-    }
-}
-
-fn format_cost_micros(value: u64) -> String {
-    format!("${:.4}", value as f64 / 1_000_000.0)
 }
 
 fn draft_context_text(
@@ -2441,7 +2572,8 @@ mod tests {
     }
 
     #[test]
-    fn local_model_folder_must_contain_manifest_bound_artifacts() {
+    fn local_model_folder_must_pass_full_runtime_verification() {
+        assert!(validate_local_model_folder(None).is_ok());
         let directory = tempfile::tempdir().unwrap();
         assert!(validate_local_model_folder(Some(directory.path())).is_err());
 
@@ -2456,9 +2588,8 @@ mod tests {
         .unwrap();
         std::fs::write(directory.path().join("model.onnx"), []).unwrap();
         assert!(validate_local_model_folder(Some(directory.path())).is_err());
-
         std::fs::write(directory.path().join("tokenizer.json"), []).unwrap();
-        assert!(validate_local_model_folder(Some(directory.path())).is_ok());
+        assert!(validate_local_model_folder(Some(directory.path())).is_err());
     }
 
     #[test]
