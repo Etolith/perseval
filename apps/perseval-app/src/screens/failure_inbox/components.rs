@@ -116,13 +116,16 @@ pub(super) fn trend_sparkline(
         .id(format!("failure-trend-{bar_values:?}"))
         .role(Role::Status)
         .aria_label(accessible_label)
+        .min_w_0()
         .flex()
         .items_center()
         .gap_2()
+        .overflow_hidden()
         .child(
             div()
                 .w(px(58.))
                 .h(px(22.))
+                .flex_none()
                 .flex()
                 .items_end()
                 .justify_between()
@@ -147,7 +150,16 @@ pub(super) fn trend_sparkline(
                         .bg(color)
                 })),
         )
-        .child(div().text_xs().text_color(tint).child(label))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_xs()
+                .text_color(tint)
+                .child(label),
+        )
 }
 
 fn recurrence_trend_summary(series: &FailureRecurrenceSeriesV1) -> (String, Rgba) {

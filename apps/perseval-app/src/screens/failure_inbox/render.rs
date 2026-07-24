@@ -219,8 +219,13 @@ impl FailureInbox {
         let cells = vec![
             div()
                 .min_w_0()
+                .overflow_hidden()
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(failure_title.clone()),
@@ -231,6 +236,10 @@ impl FailureInbox {
                         row.child(
                             div()
                                 .mt_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_xs()
                                 .text_color(Theme::MUTED)
                                 .child(value.clone()),

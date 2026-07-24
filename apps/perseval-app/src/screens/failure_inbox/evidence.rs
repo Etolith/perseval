@@ -317,47 +317,53 @@ impl FailureInbox {
                         .child(
                             div()
                                 .flex()
-                                .gap_1()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
                                 .child(
-                                    button_state("← Previous", false, previous_enabled)
-                                        .id("occurrence-previous")
-                                        .role(Role::Button)
-                                        .aria_label(if previous_enabled {
-                                            "Previous example"
-                                        } else {
-                                            "Previous example, unavailable"
-                                        })
-                                        .when(previous_enabled, |button| {
-                                            button.on_click(cx.listener(|this, _, _, cx| {
-                                                this.navigate_occurrence(false, cx)
-                                            }))
-                                        }),
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .child(
+                                            button_state("← Previous", false, previous_enabled)
+                                                .id("occurrence-previous")
+                                                .role(Role::Button)
+                                                .aria_label(if previous_enabled {
+                                                    "Previous example"
+                                                } else {
+                                                    "Previous example, unavailable"
+                                                })
+                                                .when(previous_enabled, |button| {
+                                                    button.on_click(cx.listener(
+                                                        |this, _, _, cx| {
+                                                            this.navigate_occurrence(false, cx)
+                                                        },
+                                                    ))
+                                                }),
+                                        )
+                                        .child(
+                                            button_state("Next →", false, next_enabled)
+                                                .id("occurrence-next")
+                                                .role(Role::Button)
+                                                .aria_label(if next_enabled {
+                                                    "Next example"
+                                                } else {
+                                                    "Next example, unavailable"
+                                                })
+                                                .when(next_enabled, |button| {
+                                                    button.on_click(cx.listener(
+                                                        |this, _, _, cx| {
+                                                            this.navigate_occurrence(true, cx)
+                                                        },
+                                                    ))
+                                                }),
+                                        ),
                                 )
-                                .child(
-                                    button_state("Next →", false, next_enabled)
-                                        .id("occurrence-next")
-                                        .role(Role::Button)
-                                        .aria_label(if next_enabled {
-                                            "Next example"
-                                        } else {
-                                            "Next example, unavailable"
-                                        })
-                                        .when(next_enabled, |button| {
-                                            button.on_click(cx.listener(|this, _, _, cx| {
-                                                this.navigate_occurrence(true, cx)
-                                            }))
-                                        }),
-                                ),
+                                .when_some(navigation_hint, |navigation, hint| {
+                                    navigation
+                                        .child(div().text_xs().text_color(Theme::DIM).child(hint))
+                                }),
                         )
-                        .when_some(navigation_hint, |navigation, hint| {
-                            navigation.child(
-                                div()
-                                    .when(!compact, |hint_view| hint_view.ml_2())
-                                    .text_xs()
-                                    .text_color(Theme::DIM)
-                                    .child(hint),
-                            )
-                        })
                         .child(
                             div()
                                 .flex()
