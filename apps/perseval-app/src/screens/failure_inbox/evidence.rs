@@ -948,12 +948,10 @@ impl FailureInbox {
             }
             for (assessment_index, assessment) in self.trace_assessments.iter().enumerate() {
                 let evaluation = assessment.evaluation.as_ref();
-                let verdict = evaluation
-                    .map(|evaluation| review_verdict_label(evaluation.verdict).to_string())
-                    .unwrap_or_else(|| review_status_label(assessment.status).to_string());
+                let outcome = review_outcome(evaluation, assessment.status);
                 let explanation = evaluation
                     .map(|evaluation| evaluation.explanation.as_str())
-                    .unwrap_or("No model explanation was produced for this terminal state.");
+                    .unwrap_or("Perseval could not produce a conclusion for this trace.");
                 let score = evaluation
                     .and_then(|evaluation| evaluation.score)
                     .map(|score| format!("{score:.3}"))
@@ -991,10 +989,16 @@ impl FailureInbox {
                     .unwrap_or("not recorded");
                 let abstention = evaluation
                     .and_then(|evaluation| evaluation.abstention_reason)
-                    .map(|reason| format!(" · {}", review_abstention_label(reason)))
+                    .map(review_abstention_label)
                     .unwrap_or_default();
                 let card_label = format!(
-                    "Automated output {verdict}{abstention}. {explanation}. Raw judge score {score}. Model-reported confidence {confidence}. {calibrated_summary}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}. Projection policy {projection_policy}.",
+                    "Task completion review: {}. {explanation}. {}. Raw judge score {score}. Model-reported confidence {confidence}. {calibrated_summary}. Cost ${:.6}. Latency {} milliseconds. Quality check {}. Specification {}. Projection policy {projection_policy}.",
+                    outcome.title,
+                    if abstention.is_empty() {
+                        outcome.guidance.to_string()
+                    } else {
+                        format!("{}: {abstention}", outcome.guidance)
+                    },
                     assessment.cost_micros as f64 / 1_000_000.0,
                     assessment.latency_ms,
                     short_review_identity(&assessment.evaluator_release_id),
@@ -1004,6 +1008,37 @@ impl FailureInbox {
                         .map(short_review_identity)
                         .unwrap_or("unresolved"),
                 );
+                let technical_details = div()
+                    .mt_3()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(Theme::BORDER)
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Theme::DIM)
+                    .child("TECHNICAL DETAILS")
+                    .child(
+                        div()
+                            .mt_1()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(Theme::DIM)
+                            .child(format!(
+                                "Model score {score} · confidence {confidence} · {} ms · ${:.6}\nQuality check {} · specification {} · binding {}\nProjection {} · policy {projection_policy}\nProvider {} · requested {} · returned {}",
+                                assessment.latency_ms,
+                                assessment.cost_micros as f64 / 1_000_000.0,
+                                short_review_identity(&assessment.evaluator_release_id),
+                                assessment
+                                    .context_release_id
+                                    .as_deref()
+                                    .map(short_review_identity)
+                                    .unwrap_or("unresolved"),
+                                short_review_identity(&assessment.context_binding_id),
+                                short_review_identity(&assessment.projection_hash),
+                                assessment.provider.as_deref().unwrap_or("no provider call"),
+                                assessment.requested_model.as_deref().unwrap_or("none"),
+                                assessment.returned_model.as_deref().unwrap_or("none")
+                            )),
+                    );
                 let mut card = div()
                     .id(("automated-review", assessment_index))
                     .role(Role::Group)
@@ -1015,61 +1050,84 @@ impl FailureInbox {
                     .bg(Theme::BG)
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("AUTOMATED OUTPUT")
+                            .flex()
+                            .items_center()
+                            .justify_between()
                             .child(
                                 div()
-                                    .mt_1()
-                                    .text_sm()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::DIM)
+                                    .child("TASK COMPLETION"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{verdict}{abstention}")),
+                                    .text_color(outcome.tint)
+                                    .child(outcome.badge),
                             ),
                     )
                     .child(
                         div()
                             .mt_2()
-                            .text_xs()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(Theme::TEXT)
+                            .child(outcome.title),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_sm()
                             .text_color(Theme::MUTED)
                             .child(explanation.to_string()),
                     )
                     .child(
                         div()
                             .mt_3()
+                            .p_3()
+                            .rounded_sm()
+                            .bg(outcome.surface)
                             .text_xs()
-                            .text_color(Theme::DIM)
-                            .child(format!(
-                                "Raw judge score {score}\nModel-reported confidence {confidence}\nCost ${:.6} · latency {} ms\nQuality check {}\nSpecification {}\nBinding {}\nProjection {}\nProjection release {}\nContext projection release {}\nProjection policy {projection_policy}\nApplicability taxonomy {}\nProvider {} · requested {} · returned {}",
-                                assessment.cost_micros as f64 / 1_000_000.0,
-                                assessment.latency_ms,
-                                short_review_identity(&assessment.evaluator_release_id),
-                                assessment
-                                    .context_release_id
-                                    .as_deref()
-                                    .map(short_review_identity)
-                                    .unwrap_or("unresolved"),
-                                short_review_identity(&assessment.context_binding_id),
-                                short_review_identity(&assessment.projection_hash),
-                                assessment
-                                    .projection_release_id
-                                    .as_deref()
-                                    .map(short_review_identity)
-                                    .unwrap_or("not recorded"),
-                                assessment
-                                    .context_projection_release_id
-                                    .as_deref()
-                                    .map(short_review_identity)
-                                    .unwrap_or("not recorded"),
-                                assessment
-                                    .taxonomy_release_id
-                                    .as_deref()
-                                    .map(short_review_identity)
-                                    .unwrap_or("global"),
-                                assessment.provider.as_deref().unwrap_or("no provider call"),
-                                assessment.requested_model.as_deref().unwrap_or("none"),
-                                assessment.returned_model.as_deref().unwrap_or("none")
-                            )),
+                            .text_color(outcome.tint)
+                            .child(if abstention.is_empty() {
+                                outcome.guidance.to_string()
+                            } else {
+                                format!("{}: {abstention}", outcome.guidance)
+                            }),
                     );
+                if let Some(evaluation) = evaluation {
+                    for (evidence_index, citation) in evaluation.evidence.iter().enumerate() {
+                        if let Some(span_id) = review_evidence_span_id(&citation.location) {
+                            let span_id = span_id.to_string();
+                            let evidence_label = format!(
+                                "{} ({})",
+                                citation.evidence_key,
+                                review_evidence_location_label(&citation.location)
+                            );
+                            card = card.child(
+                                button("Show related trace step", false)
+                                    .id((
+                                        "open-automated-review-evidence",
+                                        assessment_index * 100 + evidence_index,
+                                    ))
+                                    .role(Role::Button)
+                                    .aria_label(format!(
+                                        "Show the trace step cited by this review: {}",
+                                        review_evidence_location_label(&citation.location)
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.focus_assessment_evidence_span(
+                                            span_id.clone(),
+                                            evidence_label.clone(),
+                                            cx,
+                                        )
+                                    })),
+                            );
+                        }
+                    }
+                }
                 if decisions.is_empty() {
                     card = card.child(
                         div()
@@ -1079,10 +1137,8 @@ impl FailureInbox {
                             .border_color(Theme::BORDER)
                             .text_xs()
                             .text_color(Theme::DIM)
-                            .child("CALIBRATED DECISION")
-                            .child(div().mt_1().child(
-                                "Not calibrated. Raw model confidence is not a substitute.",
-                            )),
+                            .child("HUMAN CALIBRATION")
+                            .child(div().mt_1().child("Not available yet. Treat this as an automated review, not human-confirmed truth.")),
                     );
                 } else {
                     for (decision_index, decision) in decisions.iter().enumerate() {
@@ -1102,14 +1158,14 @@ impl FailureInbox {
                                 .border_color(Theme::BORDER)
                                 .text_xs()
                                 .text_color(Theme::DIM)
-                                .child("CALIBRATED DECISION")
+                                .child("HUMAN CALIBRATION")
                                 .child(
                                     div()
                                         .mt_1()
                                         .text_color(Theme::TEXT)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(format!(
-                                            "{} · failure probability {probability}",
+                                            "{} · calibrated failure risk {probability}",
                                             calibrated_decision_label(decision.decision)
                                         )),
                                 )
@@ -1121,46 +1177,7 @@ impl FailureInbox {
                         );
                     }
                 }
-                if let Some(evaluation) = evaluation {
-                    for (evidence_index, citation) in evaluation.evidence.iter().enumerate() {
-                        if let Some(span_id) = review_evidence_span_id(&citation.location) {
-                            let span_id = span_id.to_string();
-                            let evidence_label = format!(
-                                "{} ({})",
-                                citation.evidence_key,
-                                review_evidence_location_label(&citation.location)
-                            );
-                            card = card.child(
-                                button(
-                                    &format!(
-                                        "Open evidence {} · {}",
-                                        citation.evidence_key,
-                                        short_review_identity(&span_id)
-                                    ),
-                                    false,
-                                )
-                                .id((
-                                    "open-automated-review-evidence",
-                                    assessment_index * 100 + evidence_index,
-                                ))
-                                .role(Role::Button)
-                                .aria_label(format!(
-                                    "Open automated review evidence {} in the trace",
-                                    citation.evidence_key
-                                ))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.focus_assessment_evidence_span(
-                                            span_id.clone(),
-                                            evidence_label.clone(),
-                                            cx,
-                                        )
-                                    },
-                                )),
-                            );
-                        }
-                    }
-                }
+                card = card.child(technical_details);
                 panel = panel.child(card);
             }
             return panel;
@@ -1522,28 +1539,77 @@ fn review_projection_policy_label(
     }
 }
 
-fn review_verdict_label(verdict: perseval_service::analysis::LearnedVerdictV1) -> &'static str {
-    use perseval_service::analysis::LearnedVerdictV1::*;
-    match verdict {
-        Pass => "Passed",
-        Fail => "Flagged",
-        Abstain => "Abstained",
-    }
+struct ReviewOutcome {
+    title: &'static str,
+    badge: &'static str,
+    guidance: &'static str,
+    tint: Rgba,
+    surface: Rgba,
 }
 
-fn review_status_label(status: perseval_service::AssessmentItemStatusV1) -> &'static str {
+fn review_outcome(
+    evaluation: Option<&perseval_service::analysis::LearnedEvaluationV1>,
+    status: perseval_service::AssessmentItemStatusV1,
+) -> ReviewOutcome {
+    use perseval_service::analysis::LearnedVerdictV1;
+    if let Some(evaluation) = evaluation {
+        return match evaluation.verdict {
+            LearnedVerdictV1::Pass => ReviewOutcome {
+                title: "Task appears complete",
+                badge: "LIKELY COMPLETE",
+                guidance: "Open the related trace step and confirm it proves the requested outcome.",
+                tint: Theme::GREEN,
+                surface: Theme::SUCCESS_SURFACE,
+            },
+            LearnedVerdictV1::Fail => ReviewOutcome {
+                title: "Task may be incomplete",
+                badge: "POSSIBLY INCOMPLETE",
+                guidance: "Open the related trace step and confirm it explains what remains.",
+                tint: Theme::RED,
+                surface: Theme::DANGER_SURFACE,
+            },
+            LearnedVerdictV1::Abstain => ReviewOutcome {
+                title: "Perseval needs more evidence",
+                badge: "NOT ENOUGH PROOF",
+                guidance: "Improve the trace or agent context, then run this check again.",
+                tint: Theme::AMBER,
+                surface: Theme::WARNING_SURFACE,
+            },
+        };
+    }
+
     use perseval_service::AssessmentItemStatusV1::*;
     match status {
-        Pending => "Waiting",
-        Running => "Running",
-        Succeeded => "Completed",
-        Abstained => "Abstained",
-        Failed => "Failed",
-        Cancelled => "Cancelled",
-        BudgetBlocked => "Blocked by budget",
-        PrivacyBlocked => "Blocked by privacy policy",
-        ProviderUnavailable => "Provider unavailable",
-        NotApplicable => "Not applicable",
+        Pending | Running => ReviewOutcome {
+            title: "Review in progress",
+            badge: "IN PROGRESS",
+            guidance: "Perseval is still checking this trace.",
+            tint: Theme::CYAN,
+            surface: Theme::INSET_SURFACE,
+        },
+        Succeeded => ReviewOutcome {
+            title: "Review finished without a conclusion",
+            badge: "NO CONCLUSION",
+            guidance: "Run the check again. If this repeats, inspect its technical details.",
+            tint: Theme::AMBER,
+            surface: Theme::WARNING_SURFACE,
+        },
+        Abstained | NotApplicable => ReviewOutcome {
+            title: "Perseval needs more evidence",
+            badge: "NOT ENOUGH PROOF",
+            guidance: "Improve the trace or agent context, then run this check again.",
+            tint: Theme::AMBER,
+            surface: Theme::WARNING_SURFACE,
+        },
+        Failed | Cancelled | BudgetBlocked | PrivacyBlocked | ProviderUnavailable => {
+            ReviewOutcome {
+                title: "The review could not run",
+                badge: "ACTION REQUIRED",
+                guidance: "Fix the blocked check, then run it again.",
+                tint: Theme::RED,
+                surface: Theme::DANGER_SURFACE,
+            }
+        }
     }
 }
 
