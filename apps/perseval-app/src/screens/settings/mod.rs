@@ -8,9 +8,9 @@ use gpui::{
 };
 use perseval_service::{
     AgentContextGovernanceSummaryV1, AssessmentRuntimeHealthV1, ContextBackfillPreviewV1,
-    LiveTraceService, OpenAiProviderHealthV1, PersevalConfigV1, ReviewAuthorityV1,
-    TaskCompletionModelCatalogV1, TaskCompletionModelManager, TaxonomyGovernanceSummaryV1,
-    inspect_managed_model,
+    LiveTraceService, ManagedTaskCompletionModelV1, OpenAiProviderHealthV1, PersevalConfigV1,
+    ReviewAuthorityV1, TaskCompletionModelCatalogV1, TaskCompletionModelManager,
+    TaxonomyGovernanceSummaryV1, inspect_managed_install, inspect_managed_model,
 };
 
 use crate::components::{TextInput, button, button_state};
@@ -106,6 +106,7 @@ pub(crate) struct SettingsScreen {
     local_model_artifact_dir: Entity<TextInput>,
     model_manager: Option<TaskCompletionModelManager>,
     model_catalog: Option<TaskCompletionModelCatalogV1>,
+    managed_model_install: Option<ManagedTaskCompletionModelV1>,
     model_management_state: ModelManagementState,
     openai_embedding_model: Entity<TextInput>,
     openai_chat_model: Entity<TextInput>,
@@ -179,6 +180,11 @@ impl SettingsScreen {
             2_048,
             cx,
         );
+        let managed_model_install = config
+            .assessments
+            .local_model_artifact_dir
+            .as_deref()
+            .and_then(|path| inspect_managed_install(path).ok());
         let model_manager = TaskCompletionModelManager::production().ok();
         let model_management_state = if model_manager.is_some() {
             ModelManagementState::Checking
@@ -243,6 +249,7 @@ impl SettingsScreen {
             local_model_artifact_dir,
             model_manager,
             model_catalog: None,
+            managed_model_install,
             model_management_state,
             openai_embedding_model,
             openai_chat_model,
@@ -850,6 +857,7 @@ impl SettingsScreen {
                 match result {
                     Ok(model) => {
                         this.model_management_state = ModelManagementState::Ready;
+                        this.managed_model_install = Some(model.clone());
                         this.draft.assessments.enabled = true;
                         this.draft.assessments.local_model_artifact_dir =
                             Some(model.artifact_dir.clone());
@@ -1612,11 +1620,11 @@ impl SettingsScreen {
             },
             |_| "Ready on this Mac".into(),
         );
-        let installed_model_id = local_model.as_ref().map(|model| model.model_id.as_str());
-        let update_available = self
-            .model_catalog
-            .as_ref()
-            .is_some_and(|catalog| Some(catalog.model_id.as_str()) != installed_model_id);
+        let update_available = self.model_catalog.as_ref().is_some_and(|catalog| {
+            self.managed_model_install
+                .as_ref()
+                .is_none_or(|installed| !installed.matches_catalog(catalog))
+        });
         let management_status = match &self.model_management_state {
             ModelManagementState::Checking => "Checking for an available model…".into(),
             ModelManagementState::Ready => self.model_catalog.as_ref().map_or_else(

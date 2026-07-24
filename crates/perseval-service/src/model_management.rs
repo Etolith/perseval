@@ -1,9 +1,10 @@
 //! Verified installation and update management for local Task Completion models.
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use perseval_model_runtime::{RuntimeError, TaskCompletionModelManifestV1, verify_artifact};
@@ -19,8 +20,13 @@ pub const TASK_COMPLETION_MODEL_CATALOG_SCHEMA_VERSION: &str =
     "perseval.task_completion_model_catalog.v1";
 
 const EXPECTED_REPOSITORY: &str = "Etolith/perseval-task-completion";
+const INSTALL_RECEIPT_FILE: &str = ".perseval-install.json";
+const INSTALL_RECEIPT_SCHEMA_VERSION: &str = "perseval.task_completion_model_install.v1";
 const MAX_CATALOG_BYTES: usize = 64 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const NETWORK_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const ARTIFACT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelDownloadFileV1 {
@@ -50,8 +56,28 @@ pub struct ManagedTaskCompletionModelV1 {
     pub revision: String,
 }
 
+impl ManagedTaskCompletionModelV1 {
+    pub fn matches_catalog(&self, catalog: &TaskCompletionModelCatalogV1) -> bool {
+        self.release_version == catalog.release_version
+            && self.channel == catalog.channel
+            && self.model_id == catalog.model_id
+            && self.revision == catalog.revision
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManagedInstallReceiptV1 {
+    schema_version: String,
+    release_version: String,
+    channel: String,
+    model_id: String,
+    revision: String,
+}
+
 #[derive(Debug, Error)]
 pub enum ModelManagementError {
+    #[error("model download client could not be configured: {0}")]
+    ClientConfiguration(#[source] reqwest::Error),
     #[error("model catalog could not be downloaded: {0}")]
     CatalogRequest(#[source] reqwest::Error),
     #[error("model catalog response could not be read: {0}")]
@@ -62,6 +88,10 @@ pub enum ModelManagementError {
     CatalogTooLarge,
     #[error("model catalog is not valid JSON: {0}")]
     CatalogJson(#[source] serde_json::Error),
+    #[error("model installation receipt is not valid JSON: {0}")]
+    InstallReceiptJson(#[source] serde_json::Error),
+    #[error("model installation receipt is invalid: {0}")]
+    InvalidInstallReceipt(String),
     #[error("model catalog is invalid: {0}")]
     InvalidCatalog(String),
     #[error("model file {path} could not be downloaded: {source}")]
@@ -109,24 +139,29 @@ pub struct TaskCompletionModelManager {
 
 impl TaskCompletionModelManager {
     pub fn production() -> Result<Self, ModelManagementError> {
-        Ok(Self::new(
-            TASK_COMPLETION_MODEL_CATALOG_URL,
-            managed_model_root()?,
-        ))
+        Self::new(TASK_COMPLETION_MODEL_CATALOG_URL, managed_model_root()?)
     }
 
-    pub fn new(catalog_url: impl Into<String>, install_root: PathBuf) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(
+        catalog_url: impl Into<String>,
+        install_root: PathBuf,
+    ) -> Result<Self, ModelManagementError> {
+        let client = Client::builder()
+            .connect_timeout(NETWORK_CONNECT_TIMEOUT)
+            .build()
+            .map_err(ModelManagementError::ClientConfiguration)?;
+        Ok(Self {
+            client,
             catalog_url: catalog_url.into(),
             install_root,
-        }
+        })
     }
 
     pub fn latest_release(&self) -> Result<TaskCompletionModelCatalogV1, ModelManagementError> {
         let mut response = self
             .client
             .get(&self.catalog_url)
+            .timeout(CATALOG_REQUEST_TIMEOUT)
             .send()
             .map_err(ModelManagementError::CatalogRequest)?;
         if !response.status().is_success() {
@@ -166,8 +201,7 @@ impl TaskCompletionModelManager {
         std::fs::create_dir_all(&self.install_root)?;
         let destination = self.install_root.join(&catalog.release_version);
         if destination.exists() {
-            return inspect_catalog_install(&destination, catalog)
-                .map_err(|_| ModelManagementError::ExistingInstallMismatch(destination));
+            return inspect_catalog_install(&destination, catalog);
         }
 
         let nonce = SystemTime::now()
@@ -187,6 +221,7 @@ impl TaskCompletionModelManager {
         if manifest.model_id != catalog.model_id {
             return Err(ModelManagementError::ModelIdMismatch);
         }
+        write_install_receipt(staging.path(), catalog)?;
         std::fs::rename(staging.path(), &destination)?;
         staging.keep = true;
         inspect_catalog_install(&destination, catalog)
@@ -202,12 +237,15 @@ impl TaskCompletionModelManager {
             "https://huggingface.co/{}/resolve/{}/{}",
             catalog.repository, catalog.revision, file.path
         );
-        let mut response = self.client.get(url).send().map_err(|source| {
-            ModelManagementError::ArtifactRequest {
+        let mut response = self
+            .client
+            .get(url)
+            .timeout(ARTIFACT_REQUEST_TIMEOUT)
+            .send()
+            .map_err(|source| ModelManagementError::ArtifactRequest {
                 path: file.path.clone(),
                 source,
-            }
-        })?;
+            })?;
         if !response.status().is_success() {
             return Err(ModelManagementError::ArtifactStatus {
                 path: file.path.clone(),
@@ -281,10 +319,33 @@ pub fn inspect_managed_model(
         .map_err(ModelManagementError::RuntimeVerification)
 }
 
+pub fn inspect_managed_install(
+    artifact_dir: &Path,
+) -> Result<ManagedTaskCompletionModelV1, ModelManagementError> {
+    let path = artifact_dir.join(INSTALL_RECEIPT_FILE);
+    let bytes = std::fs::read(path)?;
+    let receipt: ManagedInstallReceiptV1 =
+        serde_json::from_slice(&bytes).map_err(ModelManagementError::InstallReceiptJson)?;
+    validate_install_receipt(&receipt)?;
+    Ok(ManagedTaskCompletionModelV1 {
+        artifact_dir: artifact_dir.to_path_buf(),
+        release_version: receipt.release_version,
+        channel: receipt.channel,
+        model_id: receipt.model_id,
+        revision: receipt.revision,
+    })
+}
+
 fn inspect_catalog_install(
     artifact_dir: &Path,
     catalog: &TaskCompletionModelCatalogV1,
 ) -> Result<ManagedTaskCompletionModelV1, ModelManagementError> {
+    let installed = inspect_managed_install(artifact_dir)?;
+    if !installed.matches_catalog(catalog) {
+        return Err(ModelManagementError::ExistingInstallMismatch(
+            artifact_dir.to_path_buf(),
+        ));
+    }
     for file in &catalog.files {
         verify_file(artifact_dir, file)?;
     }
@@ -292,13 +353,7 @@ fn inspect_catalog_install(
     if manifest.model_id != catalog.model_id {
         return Err(ModelManagementError::ModelIdMismatch);
     }
-    Ok(ManagedTaskCompletionModelV1 {
-        artifact_dir: artifact_dir.to_path_buf(),
-        release_version: catalog.release_version.clone(),
-        channel: catalog.channel.clone(),
-        model_id: catalog.model_id.clone(),
-        revision: catalog.revision.clone(),
-    })
+    Ok(installed)
 }
 
 fn verify_file(
@@ -306,19 +361,88 @@ fn verify_file(
     file: &ModelDownloadFileV1,
 ) -> Result<(), ModelManagementError> {
     let path = artifact_dir.join(&file.path);
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() as u64 != file.size_bytes {
+    let mut input = File::open(&path)?;
+    let metadata_size = input.metadata()?.len();
+    if metadata_size != file.size_bytes {
         return Err(ModelManagementError::ArtifactSize {
             path: file.path.clone(),
             expected: file.size_bytes,
-            actual: bytes.len() as u64,
+            actual: metadata_size,
         });
     }
-    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let mut hasher = Sha256::new();
+    let mut actual = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let count = input.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        actual = actual.saturating_add(count as u64);
+        if actual > file.size_bytes {
+            return Err(ModelManagementError::ArtifactTooLarge {
+                path: file.path.clone(),
+            });
+        }
+        hasher.update(&chunk[..count]);
+    }
+    if actual != file.size_bytes {
+        return Err(ModelManagementError::ArtifactSize {
+            path: file.path.clone(),
+            expected: file.size_bytes,
+            actual,
+        });
+    }
+    let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
     if digest != file.sha256 {
         return Err(ModelManagementError::ArtifactHash {
             path: file.path.clone(),
         });
+    }
+    Ok(())
+}
+
+fn write_install_receipt(
+    artifact_dir: &Path,
+    catalog: &TaskCompletionModelCatalogV1,
+) -> Result<(), ModelManagementError> {
+    let receipt = ManagedInstallReceiptV1 {
+        schema_version: INSTALL_RECEIPT_SCHEMA_VERSION.into(),
+        release_version: catalog.release_version.clone(),
+        channel: catalog.channel.clone(),
+        model_id: catalog.model_id.clone(),
+        revision: catalog.revision.clone(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&receipt).map_err(ModelManagementError::InstallReceiptJson)?;
+    let mut output = File::create(artifact_dir.join(INSTALL_RECEIPT_FILE))?;
+    output.write_all(&bytes)?;
+    output.write_all(b"\n")?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn validate_install_receipt(receipt: &ManagedInstallReceiptV1) -> Result<(), ModelManagementError> {
+    let invalid = |message: &str| ModelManagementError::InvalidInstallReceipt(message.to_string());
+    if receipt.schema_version != INSTALL_RECEIPT_SCHEMA_VERSION {
+        return Err(invalid("unsupported schema version"));
+    }
+    if !safe_segment(&receipt.release_version) {
+        return Err(invalid("unsafe release version"));
+    }
+    if !matches!(receipt.channel.as_str(), "development" | "stable") {
+        return Err(invalid("unsupported release channel"));
+    }
+    if receipt.model_id.trim().is_empty() {
+        return Err(invalid("model ID is empty"));
+    }
+    if receipt.revision.len() != 40
+        || !receipt
+            .revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid("revision must be an immutable commit hash"));
     }
     Ok(())
 }
@@ -371,6 +495,9 @@ fn validate_catalog(catalog: &TaskCompletionModelCatalogV1) -> Result<(), ModelM
         }
         if !names.insert(file.path.as_str()) {
             return Err(invalid("catalog contains a duplicate file"));
+        }
+        if file.path == INSTALL_RECEIPT_FILE {
+            return Err(invalid("catalog contains a reserved file name"));
         }
         if file.size_bytes == 0 || file.size_bytes > MAX_ARTIFACT_BYTES {
             return Err(invalid("catalog file size is outside the supported range"));
@@ -498,13 +625,49 @@ mod tests {
     }
 
     #[test]
+    fn managed_install_identity_includes_release_and_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let expected = catalog();
+        write_install_receipt(directory.path(), &expected).unwrap();
+
+        let installed = inspect_managed_install(directory.path()).unwrap();
+
+        assert!(installed.matches_catalog(&expected));
+        let mut newer_release = expected.clone();
+        newer_release.release_version = "runtime-candidate-v2".into();
+        assert!(!installed.matches_catalog(&newer_release));
+        let mut newer_revision = expected;
+        newer_revision.revision = "b".repeat(40);
+        assert!(!installed.matches_catalog(&newer_revision));
+    }
+
+    #[test]
+    fn existing_install_preserves_storage_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let expected = catalog();
+        let destination = directory.path().join(&expected.release_version);
+        std::fs::create_dir(&destination).unwrap();
+        write_install_receipt(&destination, &expected).unwrap();
+        let manager = TaskCompletionModelManager::new(
+            TASK_COMPLETION_MODEL_CATALOG_URL,
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+
+        let error = manager.install(&expected).unwrap_err();
+
+        assert!(matches!(error, ModelManagementError::Storage(_)));
+    }
+
+    #[test]
     #[ignore = "requires the public Hugging Face model repository"]
     fn published_candidate_downloads_and_passes_runtime_verification() {
         let directory = tempfile::tempdir().unwrap();
         let manager = TaskCompletionModelManager::new(
             TASK_COMPLETION_MODEL_CATALOG_URL,
             directory.path().to_path_buf(),
-        );
+        )
+        .unwrap();
         let catalog = manager.latest_release().unwrap();
         let installed = manager.install(&catalog).unwrap();
 

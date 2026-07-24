@@ -28,8 +28,8 @@ pub use live::{
 pub use model_management::{
     ManagedTaskCompletionModelV1, ModelDownloadFileV1, ModelManagementError,
     TASK_COMPLETION_MODEL_CATALOG_SCHEMA_VERSION, TASK_COMPLETION_MODEL_CATALOG_URL,
-    TaskCompletionModelCatalogV1, TaskCompletionModelManager, inspect_managed_model,
-    managed_model_root,
+    TaskCompletionModelCatalogV1, TaskCompletionModelManager, inspect_managed_install,
+    inspect_managed_model, managed_model_root,
 };
 pub use perseval_store::{
     ASSESSMENT_SAMPLING_POLICY_SCHEMA_VERSION, AdjudicationV1, AgentContextDraftV1,
